@@ -13,6 +13,44 @@ from pydantic import BaseModel, Field
 # Pydantic Models for LLM Output Schemas
 # ============================================================================
 
+# Individual Action schemas for multi-action signals
+class ModifyAction(BaseModel):
+    """Single modification action"""
+    action_type: str = Field(description="modify_sl, modify_tp, or modify_both")
+    trade_reference: Optional[str] = Field(None, description="Which trade to modify")
+    new_stop_loss: Optional[float] = Field(None, description="New SL price")
+    new_take_profit: Optional[float] = Field(None, description="New TP price")
+    is_breakeven: bool = Field(False, description="True if moving SL to breakeven")
+
+
+class CloseAction(BaseModel):
+    """Single close action"""
+    action_type: str = Field(description="close or partial_close")
+    trade_reference: Optional[str] = Field(None, description="Which trade to close")
+    close_percent: float = Field(100.0, description="Percentage to close")
+
+
+class NewTradeAction(BaseModel):
+    """Single new trade action"""
+    pair: str = Field(description="Trading pair")
+    action: str = Field(description="BUY or SELL")
+    entry_price: float = Field(description="Entry price (0 for market)")
+    stop_loss: float = Field(description="Stop loss price")
+    take_profit: float = Field(description="Take profit price")
+    lot_size: Optional[float] = Field(None, description="Lot size")
+    execution_type: str = Field("immediate", description="immediate or pending")
+
+
+# Multi-action signal (NEW)
+class MultiActionSignal(BaseModel):
+    """Signal with multiple actions to execute sequentially"""
+    signal_type: str = Field(default="multi_action", description="Type of signal")
+    actions: List[Dict[str, Any]] = Field(description="List of actions to execute in order")
+    reasoning: str = Field(description="Explanation of all actions")
+    confidence: float = Field(description="Confidence score 0-1")
+
+
+# Original single-action schemas (for backwards compatibility)
 class NewSignal(BaseModel):
     """Schema for a new trading signal"""
     signal_type: str = Field(default="new_signal", description="Type of signal")
@@ -56,7 +94,7 @@ class NoSignal(BaseModel):
 
 
 # Union type for all possible signal types
-SignalResponse = Union[NewSignal, ModifySignal, CloseSignal, NoSignal]
+SignalResponse = Union[NewSignal, ModifySignal, CloseSignal, NoSignal, MultiActionSignal]
 
 
 class LLMInterpreter:
@@ -220,6 +258,43 @@ class LLMInterpreter:
                     },
                     "required": ["confidence", "reasoning"]
                 }
+            },
+            {
+                "name": "report_multiple_actions",
+                "description": "Report when message contains MULTIPLE trading instructions (e.g., 'SET BE & TAKE PARTIALS'). Use this for compound signals that need multiple actions executed sequentially.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "actions": {
+                            "type": "array",
+                            "description": "List of actions to execute in order",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "enum": ["modify", "close", "new_trade"],
+                                        "description": "Type of action"
+                                    },
+                                    "details": {
+                                        "type": "object",
+                                        "description": "Action-specific details"
+                                    }
+                                },
+                                "required": ["type", "details"]
+                            }
+                        },
+                        "reasoning": {
+                            "type": "string",
+                            "description": "Explanation of all actions identified"
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "description": "Overall confidence score 0-1"
+                        }
+                    },
+                    "required": ["actions", "reasoning", "confidence"]
+                }
             }
         ]
     
@@ -357,6 +432,11 @@ Use the provided tools to report your findings. Always provide your confidence l
             elif tool_name == "report_no_signal":
                 result = NoSignal(**tool_input, signal_type="none")
                 self.logger.info("No trading signal detected")
+            
+            elif tool_name == "report_multiple_actions":
+                result = MultiActionSignal(**tool_input, signal_type="multi_action")
+                action_summary = [a['type'] for a in result.actions]
+                self.logger.info(f"Detected MULTI-ACTION signal: {action_summary}")
             
             else:
                 self.logger.warning(f"Unknown tool: {tool_name}")

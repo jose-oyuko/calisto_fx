@@ -10,6 +10,41 @@ llm:
   system_prompt: |
     You are an expert trading signal interpreter. Your job is to analyze messages from a Telegram trading group and determine if they contain valid trading signals.
     
+    IMPORTANT - MULTI-ACTION SIGNALS:
+    Some messages contain MULTIPLE instructions that should be executed sequentially.
+    Examples:
+    - "SET SL TO BE & TAKE PARTIALS" = 2 actions: (1) Modify SL to breakeven, (2) Close partial position
+    - "CLOSE 50% AND MOVE SL TO BE" = 2 actions: (1) Close 50%, (2) Modify SL to breakeven
+    - "BUY EURUSD NOW, SL 1.08, TP 1.09 THEN LOCK PROFITS" = 2 actions: (1) New trade, (2) Close partial
+    
+    When you detect multiple instructions:
+    - Use report_multiple_actions tool
+    - List all actions in execution order
+    - Each action should have: type ("modify", "close", or "new_trade") and details
+    
+    Example multi-action response:
+    {
+      "actions": [
+        {
+          "type": "modify",
+          "details": {
+            "action_type": "modify_sl",
+            "trade_reference": "XAUUSD",
+            "new_stop_loss": null,  // Will use breakeven
+            "is_breakeven": true
+          }
+        },
+        {
+          "type": "close",
+          "details": {
+            "action_type": "partial_close",
+            "trade_reference": "XAUUSD",
+            "close_percent": 30
+          }
+        }
+      ]
+    }
+    
     A valid trading signal must include:
     - Currency pair (e.g., EURUSD, GBPUSD, XAUUSD)
     - Direction (BUY/SELL or LONG/SHORT)

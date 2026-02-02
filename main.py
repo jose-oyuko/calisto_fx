@@ -29,7 +29,7 @@ if sys.platform == 'win32':
 from utils import Config, setup_logging, colorize, print_trade_summary, validate_lot_size, calculate_risk_reward
 from trade_manager import TradeManager, TradeStatus
 from mt5 import MT5Client
-from llm import LLMInterpreter, NewSignal, ModifySignal, CloseSignal, NoSignal
+from llm import LLMInterpreter, NewSignal, ModifySignal, CloseSignal, NoSignal, MultiActionSignal
 from telegram import TelegramClient
 
 
@@ -309,6 +309,10 @@ class TradingBot:
             if isinstance(signal, NewSignal):
                 self._handle_new_signal(signal, message_text, message_id)
             
+            elif isinstance(signal, MultiActionSignal):
+                # Handle multi-action signals (e.g., "SET BE & TAKE PARTIALS")
+                self._handle_multi_action_signal(signal, message_text)
+            
             elif isinstance(signal, ModifySignal):
                 # Sync with MT5 before modifying
                 changes = self.sync_trades_with_mt5()
@@ -577,6 +581,71 @@ class TradingBot:
         else:
             print(f"  {colorize('✗ EXECUTION FAILED', 'red')}")
             print(f"  {message}")
+    
+    def _handle_multi_action_signal(self, signal: MultiActionSignal, original_message: str):
+        """
+        Handle multi-action signals (e.g., "SET BE & TAKE PARTIALS")
+        Executes each action in sequence
+        """
+        print(f"\n  {colorize('📋 MULTI-ACTION SIGNAL DETECTED', 'cyan')}")
+        print(f"  Actions: {len(signal.actions)}")
+        print(f"  Confidence: {signal.confidence:.0%}")
+        print(f"  Reasoning: {signal.reasoning}")
+        
+        # Sync with MT5 once before all actions
+        changes = self.sync_trades_with_mt5()
+        if changes > 0:
+            print(f"  ℹ Synced {changes} trades with MT5")
+        
+        # Execute each action in sequence
+        for i, action_dict in enumerate(signal.actions, 1):
+            action_type = action_dict.get('type')
+            details = action_dict.get('details', {})
+            
+            print(f"\n  --- Action {i}/{len(signal.actions)}: {action_type.upper()} ---")
+            
+            if action_type == 'modify':
+                # Create ModifySignal from details
+                modify_signal = ModifySignal(
+                    action_type=details.get('action_type', 'modify_sl'),
+                    trade_reference=details.get('trade_reference'),
+                    new_stop_loss=details.get('new_stop_loss'),
+                    new_take_profit=details.get('new_take_profit'),
+                    confidence=signal.confidence,
+                    reasoning=f"Part of multi-action: {signal.reasoning}"
+                )
+                self._handle_modify_signal(modify_signal, original_message)
+            
+            elif action_type == 'close':
+                # Create CloseSignal from details
+                close_signal = CloseSignal(
+                    action_type=details.get('action_type', 'partial_close'),
+                    trade_reference=details.get('trade_reference'),
+                    close_percent=details.get('close_percent', 100.0),
+                    confidence=signal.confidence,
+                    reasoning=f"Part of multi-action: {signal.reasoning}"
+                )
+                self._handle_close_signal(close_signal, original_message)
+            
+            elif action_type == 'new_trade':
+                # Create NewSignal from details
+                new_signal = NewSignal(
+                    pair=details.get('pair'),
+                    action=details.get('action'),
+                    entry_price=details.get('entry_price', 0),
+                    stop_loss=details.get('stop_loss'),
+                    take_profit=details.get('take_profit'),
+                    lot_size=details.get('lot_size'),
+                    execution_type=details.get('execution_type', 'immediate'),
+                    confidence=signal.confidence,
+                    reasoning=f"Part of multi-action: {signal.reasoning}"
+                )
+                self._handle_new_signal(new_signal, original_message, None)
+            
+            else:
+                print(f"  ⚠ Unknown action type: {action_type}")
+        
+        print(f"\n  {colorize('✓ All actions completed', 'green')}")
     
     def _handle_modify_signal(self, signal: ModifySignal, original_message: str):
         """Handle trade modification signal"""
