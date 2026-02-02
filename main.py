@@ -307,14 +307,9 @@ class TradingBot:
         print(f"  Action: {colorize(signal.action, 'green' if signal.action == 'BUY' else 'red')}")
         print(f"  Entry: {signal.entry_price}")
         print(f"  SL: {signal.stop_loss} | TP: {signal.take_profit}")
+        print(f"  Execution Type: {signal.execution_type}")
         print(f"  Confidence: {signal.confidence:.0%}")
         print(f"  Reasoning: {signal.reasoning}")
-        
-        # Check if execution type is supported
-        if signal.execution_type != "immediate":
-            print(f"  ⚠ {signal.execution_type} execution not supported in MVP")
-            print(f"  Signal logged but not executed")
-            return
         
         # Determine lot size
         lot_size = signal.lot_size or self.config.get('risk.default_lot_size', 0.1)
@@ -348,19 +343,104 @@ class TradingBot:
             print(f"  ✗ Maximum open trades reached ({active_count}/{max_trades})")
             return
         
-        # Execute trade
+        # Execute based on execution type
         print(f"\n  {colorize('⚡ EXECUTING TRADE...', 'yellow')}")
         
-        success, ticket, message = self.mt5_client.place_market_order(
-            symbol=signal.pair,
-            order_type=signal.action,
-            lot_size=lot_size,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
-            deviation=self.config.get('mt5.deviation', 5),
-            comment=self.config.get('mt5.order_comment', 'TelegramBot')
-        )
+        success = False
+        ticket = None
+        message = ""
         
+        if signal.execution_type == "immediate":
+            # Market order execution
+            success, ticket, message = self.mt5_client.place_market_order(
+                symbol=signal.pair,
+                order_type=signal.action,
+                lot_size=lot_size,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+                deviation=self.config.get('mt5.deviation', 5),
+                comment=self.config.get('mt5.order_comment', 'TelegramBot')
+            )
+            
+        elif signal.execution_type == "pending":
+            # Pending order execution
+            # First, check current price to see if we're already in the entry zone
+            symbol_info = self.mt5_client.get_symbol_info(signal.pair)
+            
+            if symbol_info is None:
+                print(f"  ✗ Failed to get symbol info for {signal.pair}")
+                return
+            
+            current_price = symbol_info['bid'] if signal.action == "SELL" else symbol_info['ask']
+            
+            # Determine if we should execute at market (price already in range)
+            should_execute_market = False
+            
+            if signal.action == "BUY":
+                # For BUY, entry_price is the lower bound
+                # Execute at market if current price is AT or ABOVE entry
+                if current_price >= signal.entry_price:
+                    should_execute_market = True
+            else:  # SELL
+                # For SELL, entry_price is the upper bound
+                # Execute at market if current price is AT or BELOW entry
+                if current_price <= signal.entry_price:
+                    should_execute_market = True
+            
+            if should_execute_market:
+                print(f"  ℹ Price already in range (Current: {current_price}, Entry: {signal.entry_price})")
+                print(f"  ℹ Executing at market price")
+                success, ticket, message = self.mt5_client.place_market_order(
+                    symbol=signal.pair,
+                    order_type=signal.action,
+                    lot_size=lot_size,
+                    stop_loss=signal.stop_loss,
+                    take_profit=signal.take_profit,
+                    deviation=self.config.get('mt5.deviation', 5),
+                    comment=self.config.get('mt5.order_comment', 'TelegramBot')
+                )
+            else:
+                # Price not in range yet - place pending order
+                # Determine pending order type based on current price
+                pending_type = self.mt5_client.determine_pending_order_type(
+                    signal.action,
+                    signal.entry_price,
+                    signal.pair
+                )
+                
+                if pending_type is None:
+                    # Shouldn't happen, but fallback to market
+                    print(f"  ℹ Unable to determine pending type, executing at market")
+                    success, ticket, message = self.mt5_client.place_market_order(
+                        symbol=signal.pair,
+                        order_type=signal.action,
+                        lot_size=lot_size,
+                        stop_loss=signal.stop_loss,
+                        take_profit=signal.take_profit,
+                        deviation=self.config.get('mt5.deviation', 5),
+                        comment=self.config.get('mt5.order_comment', 'TelegramBot')
+                    )
+                else:
+                    # Place pending order
+                    print(f"  ℹ Price not in range yet (Current: {current_price}, Entry: {signal.entry_price})")
+                    print(f"  ℹ Placing {pending_type} order at {signal.entry_price}")
+                    success, ticket, message = self.mt5_client.place_pending_order(
+                        symbol=signal.pair,
+                        order_type=pending_type,
+                        lot_size=lot_size,
+                        entry_price=signal.entry_price,
+                        stop_loss=signal.stop_loss,
+                        take_profit=signal.take_profit,
+                        comment=self.config.get('mt5.order_comment', 'TelegramBot')
+                    )
+        
+        else:
+            # Conditional/time-based not supported yet
+            print(f"  ⚠ {signal.execution_type} execution not supported yet")
+            print(f"  Signal logged but not executed")
+            return
+        
+        # Handle execution result
         if success:
             print(f"  {colorize('✓ TRADE EXECUTED', 'green')}")
             print(f"  Ticket: {ticket}")
@@ -376,7 +456,7 @@ class TradingBot:
                 'mt5_ticket': ticket,
                 'original_message': original_message,
                 'telegram_msg_id': message_id,
-                'status': TradeStatus.ACTIVE.value
+                'status': TradeStatus.PENDING.value if signal.execution_type == "pending" else TradeStatus.ACTIVE.value
             }
             
             trade = self.trade_manager.add_trade(trade_data)
@@ -635,6 +715,8 @@ class REPL:
             self.cmd_balance()
         elif cmd == 'positions':
             self.cmd_positions()
+        elif cmd == 'pending':
+            self.cmd_pending()
         elif cmd == 'trades':
             self.cmd_trades()
         elif cmd == 'close':
@@ -656,6 +738,7 @@ class REPL:
         print("  status      - Show active trades")
         print("  balance     - Show MT5 account balance")
         print("  positions   - Show current MT5 positions")
+        print("  pending     - Show pending orders")
         print("  trades      - Show recent trade history")
         print("  close <id>  - Manually close a trade by ticket or trade_id")
         print("  stats       - Show trading statistics")
@@ -722,6 +805,39 @@ class REPL:
             print(f"  Open: {pos['open_price']} | Current: {pos['current_price']}")
             print(f"  SL: {pos['sl']} | TP: {pos['tp']}")
             print(f"  Profit: {colorize(profit_str, profit_color)}")
+            print()
+    
+    def cmd_pending(self):
+        """Show pending orders"""
+        pending = self.bot.mt5_client.get_pending_orders()
+        
+        if not pending:
+            print("\nNo pending orders")
+            return
+        
+        print(f"\n{colorize('Pending Orders:', 'cyan')} ({len(pending)})")
+        print("-" * 70)
+        
+        for order in pending:
+            # Color code based on order type
+            if 'BUY' in order['type']:
+                type_color = 'green'
+            else:
+                type_color = 'red'
+            
+            print(f"Ticket: {order['ticket']}")
+            print(f"  {colorize(order['type'], type_color)} {order['symbol']} - {order['volume']} lots")
+            print(f"  Entry Price: {order['entry_price']}")
+            print(f"  Current: {order['current_price']}")
+            print(f"  SL: {order['sl']} | TP: {order['tp']}")
+            
+            # Show time pending
+            from datetime import datetime
+            setup_time = datetime.fromtimestamp(order['time_setup'])
+            age = datetime.now() - setup_time
+            hours = int(age.total_seconds() / 3600)
+            minutes = int((age.total_seconds() % 3600) / 60)
+            print(f"  Pending for: {hours}h {minutes}m")
             print()
     
     def cmd_trades(self):

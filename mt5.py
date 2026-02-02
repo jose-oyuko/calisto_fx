@@ -255,6 +255,133 @@ class MT5Client:
         
         return True, ticket, msg
     
+    def place_pending_order(self,
+                           symbol: str,
+                           order_type: str,
+                           lot_size: float,
+                           entry_price: float,
+                           stop_loss: float = 0.0,
+                           take_profit: float = 0.0,
+                           comment: str = "TelegramBot") -> Tuple[bool, Optional[int], str]:
+        """
+        Place a pending order (Buy Limit, Buy Stop, Sell Limit, Sell Stop)
+        
+        Args:
+            symbol: Trading symbol
+            order_type: "BUY_LIMIT", "BUY_STOP", "SELL_LIMIT", "SELL_STOP"
+            lot_size: Position size in lots
+            entry_price: Price at which to enter
+            stop_loss: Stop loss price
+            take_profit: Take profit price
+            comment: Order comment
+            
+        Returns:
+            Tuple of (success, ticket_number, message)
+        """
+        if not self.check_connection():
+            return False, None, "Not connected to MT5"
+        
+        # Get symbol info
+        symbol_info = self.get_symbol_info(symbol)
+        if symbol_info is None:
+            return False, None, f"Failed to get symbol info for {symbol}"
+        
+        # Determine pending order type
+        current_price = symbol_info['bid'] if order_type.startswith('SELL') else symbol_info['ask']
+        
+        order_type_upper = order_type.upper()
+        if order_type_upper == "BUY_LIMIT":
+            trade_type = mt5.ORDER_TYPE_BUY_LIMIT
+        elif order_type_upper == "BUY_STOP":
+            trade_type = mt5.ORDER_TYPE_BUY_STOP
+        elif order_type_upper == "SELL_LIMIT":
+            trade_type = mt5.ORDER_TYPE_SELL_LIMIT
+        elif order_type_upper == "SELL_STOP":
+            trade_type = mt5.ORDER_TYPE_SELL_STOP
+        else:
+            return False, None, f"Invalid pending order type: {order_type}"
+        
+        # Normalize lot size
+        lot_size = round(lot_size / symbol_info['volume_step']) * symbol_info['volume_step']
+        lot_size = max(symbol_info['volume_min'], min(lot_size, symbol_info['volume_max']))
+        
+        # Normalize prices
+        digits = symbol_info['digits']
+        entry_price = round(entry_price, digits)
+        if stop_loss > 0:
+            stop_loss = round(stop_loss, digits)
+        if take_profit > 0:
+            take_profit = round(take_profit, digits)
+        
+        # Prepare pending order request
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": lot_size,
+            "type": trade_type,
+            "price": entry_price,
+            "sl": stop_loss,
+            "tp": take_profit,
+            "magic": self.magic_number,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,  # Good Till Cancelled
+            "type_filling": mt5.ORDER_FILLING_RETURN,
+        }
+        
+        # Send pending order
+        self.logger.info(f"Placing pending order: {order_type} {symbol} {lot_size} lots @ {entry_price}")
+        result = mt5.order_send(request)
+        
+        if result is None:
+            error = mt5.last_error()
+            msg = f"Pending order send failed: {error}"
+            self.logger.error(msg)
+            return False, None, msg
+        
+        # Check result
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            msg = f"Pending order failed with retcode: {result.retcode} - {result.comment}"
+            self.logger.error(msg)
+            return False, None, msg
+        
+        # Success
+        ticket = result.order
+        msg = f"Pending order placed successfully - Ticket: {ticket}, Entry: {entry_price}"
+        self.logger.info(msg)
+        
+        return True, ticket, msg
+    
+    def determine_pending_order_type(self, action: str, entry_price: float, symbol: str) -> Optional[str]:
+        """
+        Determine the correct pending order type based on current price
+        
+        Args:
+            action: "BUY" or "SELL"
+            entry_price: Desired entry price
+            symbol: Trading symbol
+            
+        Returns:
+            Pending order type string or None if should be market order
+        """
+        symbol_info = self.get_symbol_info(symbol)
+        if symbol_info is None:
+            return None
+        
+        current_price = symbol_info['ask'] if action == "BUY" else symbol_info['bid']
+        
+        if action.upper() == "BUY":
+            if entry_price < current_price:
+                return "BUY_LIMIT"  # Buy below current price
+            elif entry_price > current_price:
+                return "BUY_STOP"   # Buy above current price (breakout)
+        elif action.upper() == "SELL":
+            if entry_price > current_price:
+                return "SELL_LIMIT"  # Sell above current price
+            elif entry_price < current_price:
+                return "SELL_STOP"   # Sell below current price (breakdown)
+        
+        return None  # Should execute at market
+    
     def modify_order(self, 
                     ticket: int,
                     stop_loss: Optional[float] = None,
@@ -456,6 +583,48 @@ class MT5Client:
             if pos['ticket'] == ticket:
                 return pos
         return None
+    
+    def get_pending_orders(self) -> List[Dict[str, Any]]:
+        """
+        Get all pending orders
+        
+        Returns:
+            List of pending order dictionaries
+        """
+        if not self.check_connection():
+            return []
+        
+        orders = mt5.orders_get()
+        if orders is None:
+            return []
+        
+        result = []
+        for order in orders:
+            # Determine order type name
+            order_type_map = {
+                mt5.ORDER_TYPE_BUY_LIMIT: "BUY_LIMIT",
+                mt5.ORDER_TYPE_BUY_STOP: "BUY_STOP",
+                mt5.ORDER_TYPE_SELL_LIMIT: "SELL_LIMIT",
+                mt5.ORDER_TYPE_SELL_STOP: "SELL_STOP",
+            }
+            
+            order_type_name = order_type_map.get(order.type, "UNKNOWN")
+            
+            result.append({
+                'ticket': order.ticket,
+                'symbol': order.symbol,
+                'type': order_type_name,
+                'volume': order.volume_current,
+                'entry_price': order.price_open,
+                'current_price': order.price_current,
+                'sl': order.sl,
+                'tp': order.tp,
+                'magic': order.magic,
+                'comment': order.comment,
+                'time_setup': order.time_setup,
+            })
+        
+        return result
 
 
 # Example usage and testing
@@ -479,9 +648,9 @@ if __name__ == "__main__":
     
     # Note: Login requires actual credentials
     # Uncomment and provide credentials to test
-    
+    """
     print("\n2. Logging in...")
-    if client.login(account=5901693, password="Oyuko@D25", server="Deriv-Demo"):
+    if client.login(account=12345, password="password", server="Broker-Server"):
         print("✓ Login successful")
     else:
         print("✗ Login failed")
@@ -510,7 +679,7 @@ if __name__ == "__main__":
     print(f"✓ Open positions: {len(positions)}")
     for pos in positions:
         print(f"  {pos['ticket']}: {pos['type']} {pos['symbol']} {pos['volume']} lots")
-    
+    """
     
     # Shutdown
     print("\n6. Shutting down...")
@@ -518,5 +687,5 @@ if __name__ == "__main__":
     print("✓ MT5 connection closed")
     
     print("\n" + "=" * 50)
-    # print("Note: Full testing requires MT5 credentials")
-    # print("Uncomment the test section and provide credentials")
+    print("Note: Full testing requires MT5 credentials")
+    print("Uncomment the test section and provide credentials")
