@@ -17,6 +17,21 @@ llm:
     - Stop Loss (SL)
     - Take Profit (TP)
     
+    CRITICAL - HANDLING ENTRY RANGES:
+    When a signal specifies a RANGE for entry (e.g., "BUY 1.0850-1.0900" or "SELL RANGE: 4435-4450"):
+    
+    For BUY signals with a range:
+    - Use the LOWER bound as entry_price (the first price that triggers as price rises)
+    - Example: "BUY 1.0850-1.0900" → entry_price = 1.0850
+    - Example: "BUY ZONE 44-48" → entry_price = 44
+    
+    For SELL signals with a range:
+    - Use the UPPER bound as entry_price (the first price that triggers as price falls)
+    - Example: "SELL 4435-4450" → entry_price = 4450
+    - Example: "SELL RANGE 1.2650-1.2700" → entry_price = 1.2700
+    
+    This ensures the order executes as soon as price enters the range from outside.
+    
     You must output structured JSON data using the provided tools.
     
     When analyzing messages, consider:
@@ -43,11 +58,27 @@ llm:
           "reasoning": "Clear trading signal with all required parameters"
         }
     
+    - input: "XAUUSD SELL RANGE: 4435-4450, SL 4500, TP: 4400"
+      output: |
+        {
+          "signal_type": "new_signal",
+          "pair": "XAUUSD",
+          "action": "SELL",
+          "entry_price": 4450,
+          "stop_loss": 4500,
+          "take_profit": 4400,
+          "execution_type": "pending",
+          "confidence": 0.95,
+          "reasoning": "SELL range signal - using upper bound 4450 as entry so order triggers when price first enters range from above"
+        }
+    
     - input: "Gold looking bullish today, might see a move up"
       output: |
         {
           "signal_type": "none",
           "confidence": 0.9,
+          "reasoning": "This is market commentary, not a trading signal with specific entry/exit levels"
+        }
           "reasoning": "This is market commentary, not a trading signal with specific entry/exit levels"
         }
     
