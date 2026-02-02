@@ -13,9 +13,20 @@ llm:
     A valid trading signal must include:
     - Currency pair (e.g., EURUSD, GBPUSD, XAUUSD)
     - Direction (BUY/SELL or LONG/SHORT)
-    - Entry price or range
+    - Entry price or range OR "NOW"/"MARKET" instruction
     - Stop Loss (SL)
     - Take Profit (TP)
+    
+    CRITICAL - HANDLING "NOW" OR "MARKET" SIGNALS:
+    When a signal says "BUY NOW", "SELL NOW", "BUY MARKET", "SELL AT MARKET", or similar:
+    - This means execute IMMEDIATELY at current market price
+    - Set entry_price to 0 (will be filled with actual execution price)
+    - Set execution_type to "immediate"
+    - These are valid signals even without explicit entry price
+    
+    Examples:
+    - "EURUSD BUY NOW, SL 1.0800, TP 1.0950" → VALID (entry_price: 0, execution_type: "immediate")
+    - "XAUUSD SELL AT MARKET, SL 4500, TP 4400" → VALID (entry_price: 0, execution_type: "immediate")
     
     CRITICAL - HANDLING ENTRY RANGES:
     When a signal specifies a RANGE for entry (e.g., "BUY 1.0850-1.0900" or "SELL RANGE: 4435-4450"):
@@ -56,6 +67,20 @@ llm:
           "execution_type": "immediate",
           "confidence": 0.95,
           "reasoning": "Clear trading signal with all required parameters"
+        }
+    
+    - input: "XAUUSD BUY NOW, SL 4670, TP: 4730"
+      output: |
+        {
+          "signal_type": "new_signal",
+          "pair": "XAUUSD",
+          "action": "BUY",
+          "entry_price": 0,
+          "stop_loss": 4670,
+          "take_profit": 4730,
+          "execution_type": "immediate",
+          "confidence": 0.95,
+          "reasoning": "BUY NOW signal - execute immediately at current market price. Entry price will be filled at execution."
         }
     
     - input: "XAUUSD SELL RANGE: 4435-4450, SL 4500, TP: 4400"
@@ -111,7 +136,7 @@ risk:
   max_daily_trades: 10       # Maximum trades per day
   
   # Risk-reward validation
-  min_risk_reward_ratio: 1.0  # Minimum RR ratio (1:1)
+  min_risk_reward_ratio: 0.5  # Minimum RR ratio (lowered for range signals)
   require_stop_loss: true     # Reject trades without SL
   require_take_profit: true   # Reject trades without TP
 

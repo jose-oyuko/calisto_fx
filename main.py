@@ -305,7 +305,21 @@ class TradingBot:
         print(f"\n  {colorize('📊 NEW SIGNAL DETECTED', 'cyan')}")
         print(f"  Pair: {signal.pair}")
         print(f"  Action: {colorize(signal.action, 'green' if signal.action == 'BUY' else 'red')}")
-        print(f"  Entry: {signal.entry_price}")
+        
+        # Handle entry_price = 0 (NOW/MARKET signals)
+        if signal.entry_price == 0:
+            # Get current market price
+            symbol_info = self.mt5_client.get_symbol_info(signal.pair)
+            if symbol_info:
+                market_price = symbol_info['ask'] if signal.action == 'BUY' else symbol_info['bid']
+                signal.entry_price = market_price
+                print(f"  Entry: MARKET (current: {market_price})")
+            else:
+                print(f"  ✗ Failed to get current market price for {signal.pair}")
+                return
+        else:
+            print(f"  Entry: {signal.entry_price}")
+        
         print(f"  SL: {signal.stop_loss} | TP: {signal.take_profit}")
         print(f"  Execution Type: {signal.execution_type}")
         print(f"  Confidence: {signal.confidence:.0%}")
@@ -320,7 +334,7 @@ class TradingBot:
             print(f"  ✗ {error_msg}")
             return
         
-        # Calculate risk-reward ratio
+        # Calculate risk-reward ratio (now with actual entry price)
         rr_ratio = calculate_risk_reward(
             signal.entry_price,
             signal.stop_loss,
@@ -333,6 +347,8 @@ class TradingBot:
         
         if rr_ratio < min_rr:
             print(f"  ✗ RR ratio {rr_ratio:.2f} below minimum {min_rr}")
+            print(f"  💡 Tip: You can lower 'risk.min_risk_reward_ratio' in config.yaml")
+            print(f"     Current minimum: {min_rr}, Signal RR: {rr_ratio:.2f}")
             return
         
         # Check max open trades
@@ -373,6 +389,10 @@ class TradingBot:
             
             current_price = symbol_info['bid'] if signal.action == "SELL" else symbol_info['ask']
             
+            print(f"  ℹ Current market price: {current_price}")
+            print(f"  ℹ Signal entry price: {signal.entry_price}")
+            print(f"  ℹ Action: {signal.action}")
+            
             # Determine if we should execute at market (price already in range)
             should_execute_market = False
             
@@ -381,15 +401,20 @@ class TradingBot:
                 # Execute at market if current price is AT or ABOVE entry
                 if current_price >= signal.entry_price:
                     should_execute_market = True
+                    print(f"  ℹ Price analysis: Current ({current_price}) >= Entry ({signal.entry_price}) - IN RANGE")
+                else:
+                    print(f"  ℹ Price analysis: Current ({current_price}) < Entry ({signal.entry_price}) - BELOW RANGE")
             else:  # SELL
                 # For SELL, entry_price is the upper bound
                 # Execute at market if current price is AT or BELOW entry
                 if current_price <= signal.entry_price:
                     should_execute_market = True
+                    print(f"  ℹ Price analysis: Current ({current_price}) <= Entry ({signal.entry_price}) - IN RANGE")
+                else:
+                    print(f"  ℹ Price analysis: Current ({current_price}) > Entry ({signal.entry_price}) - ABOVE RANGE")
             
             if should_execute_market:
-                print(f"  ℹ Price already in range (Current: {current_price}, Entry: {signal.entry_price})")
-                print(f"  ℹ Executing at market price")
+                print(f"  ℹ Price already in range - executing at market")
                 success, ticket, message = self.mt5_client.place_market_order(
                     symbol=signal.pair,
                     order_type=signal.action,
@@ -408,9 +433,11 @@ class TradingBot:
                     signal.pair
                 )
                 
+                print(f"  ℹ Determined pending order type: {pending_type}")
+                
                 if pending_type is None:
                     # Shouldn't happen, but fallback to market
-                    print(f"  ℹ Unable to determine pending type, executing at market")
+                    print(f"  ⚠ Unable to determine pending type, executing at market")
                     success, ticket, message = self.mt5_client.place_market_order(
                         symbol=signal.pair,
                         order_type=signal.action,
@@ -422,7 +449,6 @@ class TradingBot:
                     )
                 else:
                     # Place pending order
-                    print(f"  ℹ Price not in range yet (Current: {current_price}, Entry: {signal.entry_price})")
                     print(f"  ℹ Placing {pending_type} order at {signal.entry_price}")
                     success, ticket, message = self.mt5_client.place_pending_order(
                         symbol=signal.pair,
