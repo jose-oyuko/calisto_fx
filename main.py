@@ -380,7 +380,7 @@ class TradingBot:
             
         elif signal.execution_type == "pending":
             # Pending order execution
-            # First, check current price to see if we're already in the entry zone
+            # Get current price to determine execution strategy
             symbol_info = self.mt5_client.get_symbol_info(signal.pair)
             
             if symbol_info is None:
@@ -393,28 +393,54 @@ class TradingBot:
             print(f"  ℹ Signal entry price: {signal.entry_price}")
             print(f"  ℹ Action: {signal.action}")
             
-            # Determine if we should execute at market (price already in range)
-            should_execute_market = False
+            # Determine execution strategy based on price relationship
+            execute_now = False
+            pending_type = None
             
             if signal.action == "BUY":
-                # For BUY, entry_price is the lower bound
-                # Execute at market if current price is AT or ABOVE entry
-                if current_price >= signal.entry_price:
-                    should_execute_market = True
-                    print(f"  ℹ Price analysis: Current ({current_price}) >= Entry ({signal.entry_price}) - IN RANGE")
+                # BUY logic:
+                # - If current price == entry: execute at market
+                # - If current price < entry: place BUY_STOP (wait for price to rise TO entry)
+                # - If current price > entry: place BUY_LIMIT (wait for price to drop TO entry)
+                
+                if abs(current_price - signal.entry_price) < (symbol_info['point'] * 10):
+                    # Price is at entry (within 10 points)
+                    execute_now = True
+                    print(f"  ℹ Price at entry level - executing at market")
+                elif current_price < signal.entry_price:
+                    # Current below entry - wait for price to RISE
+                    pending_type = "BUY_STOP"
+                    print(f"  ℹ Price below entry ({current_price} < {signal.entry_price})")
+                    print(f"  ℹ Placing BUY_STOP - triggers when price rises to {signal.entry_price}")
                 else:
-                    print(f"  ℹ Price analysis: Current ({current_price}) < Entry ({signal.entry_price}) - BELOW RANGE")
+                    # Current above entry - wait for price to FALL  
+                    pending_type = "BUY_LIMIT"
+                    print(f"  ℹ Price above entry ({current_price} > {signal.entry_price})")
+                    print(f"  ℹ Placing BUY_LIMIT - triggers when price drops to {signal.entry_price}")
+                    
             else:  # SELL
-                # For SELL, entry_price is the upper bound
-                # Execute at market if current price is AT or BELOW entry
-                if current_price <= signal.entry_price:
-                    should_execute_market = True
-                    print(f"  ℹ Price analysis: Current ({current_price}) <= Entry ({signal.entry_price}) - IN RANGE")
+                # SELL logic:
+                # - If current price == entry: execute at market
+                # - If current price > entry: place SELL_STOP (wait for price to fall TO entry)
+                # - If current price < entry: place SELL_LIMIT (wait for price to rise TO entry)
+                
+                if abs(current_price - signal.entry_price) < (symbol_info['point'] * 10):
+                    # Price is at entry
+                    execute_now = True
+                    print(f"  ℹ Price at entry level - executing at market")
+                elif current_price > signal.entry_price:
+                    # Current above entry - wait for price to FALL
+                    pending_type = "SELL_STOP"
+                    print(f"  ℹ Price above entry ({current_price} > {signal.entry_price})")
+                    print(f"  ℹ Placing SELL_STOP - triggers when price drops to {signal.entry_price}")
                 else:
-                    print(f"  ℹ Price analysis: Current ({current_price}) > Entry ({signal.entry_price}) - ABOVE RANGE")
+                    # Current below entry - wait for price to RISE
+                    pending_type = "SELL_LIMIT"
+                    print(f"  ℹ Price below entry ({current_price} < {signal.entry_price})")
+                    print(f"  ℹ Placing SELL_LIMIT - triggers when price rises to {signal.entry_price}")
             
-            if should_execute_market:
-                print(f"  ℹ Price already in range - executing at market")
+            # Execute based on strategy
+            if execute_now:
                 success, ticket, message = self.mt5_client.place_market_order(
                     symbol=signal.pair,
                     order_type=signal.action,
@@ -425,40 +451,16 @@ class TradingBot:
                     comment=self.config.get('mt5.order_comment', 'TelegramBot')
                 )
             else:
-                # Price not in range yet - place pending order
-                # Determine pending order type based on current price
-                pending_type = self.mt5_client.determine_pending_order_type(
-                    signal.action,
-                    signal.entry_price,
-                    signal.pair
+                # Place pending order
+                success, ticket, message = self.mt5_client.place_pending_order(
+                    symbol=signal.pair,
+                    order_type=pending_type,
+                    lot_size=lot_size,
+                    entry_price=signal.entry_price,
+                    stop_loss=signal.stop_loss,
+                    take_profit=signal.take_profit,
+                    comment=self.config.get('mt5.order_comment', 'TelegramBot')
                 )
-                
-                print(f"  ℹ Determined pending order type: {pending_type}")
-                
-                if pending_type is None:
-                    # Shouldn't happen, but fallback to market
-                    print(f"  ⚠ Unable to determine pending type, executing at market")
-                    success, ticket, message = self.mt5_client.place_market_order(
-                        symbol=signal.pair,
-                        order_type=signal.action,
-                        lot_size=lot_size,
-                        stop_loss=signal.stop_loss,
-                        take_profit=signal.take_profit,
-                        deviation=self.config.get('mt5.deviation', 5),
-                        comment=self.config.get('mt5.order_comment', 'TelegramBot')
-                    )
-                else:
-                    # Place pending order
-                    print(f"  ℹ Placing {pending_type} order at {signal.entry_price}")
-                    success, ticket, message = self.mt5_client.place_pending_order(
-                        symbol=signal.pair,
-                        order_type=pending_type,
-                        lot_size=lot_size,
-                        entry_price=signal.entry_price,
-                        stop_loss=signal.stop_loss,
-                        take_profit=signal.take_profit,
-                        comment=self.config.get('mt5.order_comment', 'TelegramBot')
-                    )
         
         else:
             # Conditional/time-based not supported yet
@@ -508,7 +510,10 @@ class TradingBot:
         
         if not trade:
             print(f"  ✗ Could not identify which trade to modify")
-            print(f"  Active trades: {len(self.trade_manager.get_active_trades())}")
+            active_count = len(self.trade_manager.get_active_trades())
+            print(f"  Active trades: {active_count}")
+            if active_count > 0:
+                print(f"  💡 Tip: Try checking 'status' to see active trades")
             return
         
         print(f"  Matched to: {trade.action} {trade.pair} (Ticket: {trade.mt5_ticket})")
@@ -518,9 +523,32 @@ class TradingBot:
         new_tp = signal.new_take_profit if signal.new_take_profit else trade.take_profit
         
         # Handle special cases like "move to breakeven"
-        if "breakeven" in original_message.lower():
+        if "breakeven" in original_message.lower() or "be" in original_message.lower():
             new_sl = trade.entry_price
             print(f"  Moving SL to breakeven: {new_sl}")
+        else:
+            if new_sl != trade.stop_loss:
+                print(f"  New SL: {new_sl} (was {trade.stop_loss})")
+            if new_tp != trade.take_profit:
+                print(f"  New TP: {new_tp} (was {trade.take_profit})")
+        
+        # Check if position still exists in MT5
+        exists, location = self.mt5_client.check_ticket_exists(trade.mt5_ticket)
+        
+        if not exists:
+            print(f"  ℹ Position already closed in MT5")
+            print(f"  ℹ Updating trade status in database")
+            self.trade_manager.close_trade(trade.trade_id, 0, 0)
+            print(f"  ✓ Trade marked as closed")
+            return
+        
+        if location == 'pending':
+            print(f"  ℹ This is a pending order - modifying SL/TP")
+            # For pending orders, we'd need to cancel and replace
+            # For now, just notify user
+            print(f"  💡 Note: Pending orders require manual modification in MT5")
+            print(f"  Or wait for order to fill, then modify will work")
+            return
         
         # Execute modification
         print(f"\n  {colorize('⚡ MODIFYING POSITION...', 'yellow')}")
@@ -542,8 +570,8 @@ class TradingBot:
             
             self.trade_manager.save_trades()
             
-            print(f"  New SL: {new_sl}")
-            print(f"  New TP: {new_tp}")
+            print(f"  Current SL: {new_sl}")
+            print(f"  Current TP: {new_tp}")
         else:
             print(f"  {colorize('✗ MODIFICATION FAILED', 'red')}")
             print(f"  {message}")
@@ -560,15 +588,34 @@ class TradingBot:
         
         if not trade:
             print(f"  ✗ Could not identify which trade to close")
+            active_count = len(self.trade_manager.get_active_trades())
+            print(f"  Active trades: {active_count}")
+            if active_count > 0:
+                print(f"  💡 Tip: Try checking 'status' to see active trades")
             return
         
         print(f"  Matched to: {trade.action} {trade.pair} (Ticket: {trade.mt5_ticket})")
+        
+        # Check if ticket still exists in MT5
+        exists, location = self.mt5_client.check_ticket_exists(trade.mt5_ticket)
+        
+        if not exists:
+            print(f"  ℹ Position already closed in MT5")
+            print(f"  ℹ Updating trade status in database")
+            self.trade_manager.close_trade(trade.trade_id, 0, 0)
+            print(f"  ✓ Trade marked as closed")
+            return
+        
+        if location == 'pending':
+            print(f"  ℹ This is a pending order, not an open position yet")
+            print(f"  💡 To cancel pending order, use MT5 directly or wait for it to fill")
+            return
         
         # Determine volume to close
         volume = None
         if signal.close_percent and signal.close_percent < 100:
             volume = trade.lot_size * (signal.close_percent / 100.0)
-            print(f"  Closing {signal.close_percent}% = {volume} lots")
+            print(f"  Closing {signal.close_percent}% = {volume:.2f} lots")
         
         # Execute close
         print(f"\n  {colorize('⚡ CLOSING POSITION...', 'yellow')}")
@@ -581,22 +628,36 @@ class TradingBot:
         
         if success:
             print(f"  {colorize('✓ POSITION CLOSED', 'green')}")
-            print(f"  Close Price: {close_price}")
+            if close_price:
+                print(f"  Close Price: {close_price}")
+            else:
+                print(f"  {message}")
             
             # Update trade record
             if volume is None or signal.close_percent >= 100:
                 # Full close
-                self.trade_manager.close_trade(trade.trade_id, close_price, 0.0)
+                # Calculate P&L if we have close price
+                pnl = 0.0
+                if close_price:
+                    if trade.action == "BUY":
+                        pnl = (close_price - trade.entry_price) * trade.lot_size * 100000  # Simplified
+                    else:
+                        pnl = (trade.entry_price - close_price) * trade.lot_size * 100000
+                
+                self.trade_manager.close_trade(trade.trade_id, close_price or 0, pnl)
                 print(f"  Trade fully closed")
             else:
-                # Partial close
+                # Partial close - update lot size
+                remaining_lots = trade.lot_size - volume
+                trade.lot_size = remaining_lots
                 trade.add_modification('partial_close', {
                     'percent': signal.close_percent,
                     'volume': volume,
-                    'price': close_price
+                    'price': close_price,
+                    'remaining_lots': remaining_lots
                 })
                 self.trade_manager.save_trades()
-                print(f"  Trade partially closed")
+                print(f"  Trade partially closed - {remaining_lots:.2f} lots remaining")
         else:
             print(f"  {colorize('✗ CLOSE FAILED', 'red')}")
             print(f"  {message}")
@@ -753,6 +814,8 @@ class REPL:
             self.cmd_resume()
         elif cmd == 'stats':
             self.cmd_stats()
+        elif cmd == 'sync':
+            self.cmd_sync()
         elif cmd == 'exit' or cmd == 'quit':
             self.running = False
         else:
@@ -768,6 +831,7 @@ class REPL:
         print("  trades      - Show recent trade history")
         print("  close <id>  - Manually close a trade by ticket or trade_id")
         print("  stats       - Show trading statistics")
+        print("  sync        - Sync trade manager with MT5 (close trades that no longer exist)")
         print("  pause       - Pause message processing")
         print("  resume      - Resume message processing")
         print("  help        - Show this help message")
@@ -946,6 +1010,34 @@ class REPL:
             pnl_color = 'green' if stats['total_pnl'] >= 0 else 'red'
             pnl_str = f"{stats['total_pnl']:.2f}"
             print(f"  Total P&L: {colorize(pnl_str, pnl_color)}")
+        print()
+    
+    def cmd_sync(self):
+        """Sync trade manager with MT5 - close trades that no longer exist"""
+        print(f"\n{colorize('Syncing with MT5...', 'cyan')}")
+        
+        active_trades = self.bot.trade_manager.get_active_trades()
+        if not active_trades:
+            print("No active trades to sync")
+            return
+        
+        # Get all open positions from MT5
+        mt5_positions = self.bot.mt5_client.get_open_positions()
+        mt5_tickets = {pos['ticket'] for pos in mt5_positions}
+        
+        closed_count = 0
+        for trade in active_trades:
+            if trade.mt5_ticket and trade.mt5_ticket not in mt5_tickets:
+                # Trade exists in our system but not in MT5 - mark as closed
+                print(f"  ℹ Trade {trade.pair} (Ticket: {trade.mt5_ticket}) not found in MT5")
+                print(f"     Marking as closed...")
+                self.bot.trade_manager.close_trade(trade.trade_id, 0, 0)
+                closed_count += 1
+        
+        if closed_count > 0:
+            print(f"\n✓ Synced {closed_count} trade(s) - marked as closed")
+        else:
+            print(f"\n✓ All trades in sync with MT5")
         print()
 
 

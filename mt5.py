@@ -500,7 +500,21 @@ class MT5Client:
         # Get position info
         position = mt5.positions_get(ticket=ticket)
         if position is None or len(position) == 0:
-            return False, None, f"Position {ticket} not found"
+            # Position not found - might already be closed
+            self.logger.warning(f"Position {ticket} not found in open positions")
+            
+            # Check if it was closed recently by looking at history
+            from datetime import datetime, timedelta
+            now = datetime.now()
+            from_date = now - timedelta(hours=1)  # Check last hour
+            
+            deals = mt5.history_deals_get(from_date, now, position=ticket)
+            if deals and len(deals) > 0:
+                # Found in history - was closed
+                last_deal = deals[-1]
+                return True, last_deal.price, f"Position {ticket} was already closed at {last_deal.price}"
+            
+            return False, None, f"Position {ticket} not found (may have been closed manually or hit SL/TP)"
         
         position = position[0]
         symbol = position.symbol
@@ -527,41 +541,61 @@ class MT5Client:
             order_type = mt5.ORDER_TYPE_BUY
             price = symbol_info['ask']
         
-        # Prepare close request
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": volume,
-            "type": order_type,
-            "position": ticket,
-            "price": price,
-            "deviation": deviation,
-            "magic": self.magic_number,
-            "comment": "Close by bot",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
+        # Try different filling modes
+        filling_modes = [
+            mt5.ORDER_FILLING_FOK,
+            mt5.ORDER_FILLING_IOC,
+            mt5.ORDER_FILLING_RETURN,
+        ]
         
-        # Send close order
-        self.logger.info(f"Closing position {ticket}: {volume} lots @ {price}")
-        result = mt5.order_send(request)
+        last_error_msg = ""
         
-        if result is None:
-            error = mt5.last_error()
-            msg = f"Close failed: {error}"
-            self.logger.error(msg)
-            return False, None, msg
+        for filling_mode in filling_modes:
+            # Prepare close request
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": volume,
+                "type": order_type,
+                "position": ticket,
+                "price": price,
+                "deviation": deviation,
+                "magic": self.magic_number,
+                "comment": "Close by bot",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling_mode,
+            }
+            
+            # Send close order
+            self.logger.info(f"Closing position {ticket}: {volume} lots @ {price}")
+            result = mt5.order_send(request)
+            
+            if result is None:
+                error = mt5.last_error()
+                last_error_msg = f"Close failed: {error}"
+                self.logger.warning(f"{last_error_msg}, trying next filling mode...")
+                continue
+            
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                close_price = result.price
+                msg = f"Position {ticket} closed successfully at {close_price}"
+                self.logger.info(msg)
+                return True, close_price, msg
+            
+            elif result.retcode == 10030:  # Unsupported filling mode
+                last_error_msg = f"Filling mode not supported"
+                self.logger.warning(f"{last_error_msg}, trying next...")
+                continue
+            
+            else:
+                last_error_msg = f"Close failed with retcode: {result.retcode} - {result.comment}"
+                self.logger.error(last_error_msg)
+                return False, None, last_error_msg
         
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            msg = f"Close failed with retcode: {result.retcode} - {result.comment}"
-            self.logger.error(msg)
-            return False, None, msg
-        
-        close_price = result.price
-        msg = f"Position {ticket} closed successfully at {close_price}"
-        self.logger.info(msg)
-        
-        return True, close_price, msg
+        # All filling modes failed
+        msg = f"All filling modes failed. Last error: {last_error_msg}"
+        self.logger.error(msg)
+        return False, None, msg
     
     def get_open_positions(self) -> List[Dict[str, Any]]:
         """
@@ -652,6 +686,28 @@ class MT5Client:
             })
         
         return result
+    
+    def check_ticket_exists(self, ticket: int) -> Tuple[bool, str]:
+        """
+        Check if ticket exists in open positions or pending orders
+        
+        Args:
+            ticket: Ticket number to check
+            
+        Returns:
+            Tuple of (exists, location) where location is 'position', 'pending', or 'none'
+        """
+        # Check open positions
+        positions = mt5.positions_get(ticket=ticket)
+        if positions and len(positions) > 0:
+            return True, 'position'
+        
+        # Check pending orders
+        orders = mt5.orders_get(ticket=ticket)
+        if orders and len(orders) > 0:
+            return True, 'pending'
+        
+        return False, 'none'
 
 
 # Example usage and testing
@@ -714,5 +770,5 @@ if __name__ == "__main__":
     print("✓ MT5 connection closed")
     
     print("\n" + "=" * 50)
-    # print("Note: Full testing requires MT5 credentials")
-    # print("Uncomment the test section and provide credentials")
+    print("Note: Full testing requires MT5 credentials")
+    print("Uncomment the test section and provide credentials")
