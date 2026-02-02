@@ -62,6 +62,12 @@ class TradingBot:
         self.is_paused = False
         self.selected_chat_id: Optional[int] = None
         
+        # Conversational context
+        self.recent_messages = []  # Store last 5 messages for context
+        self.max_context_messages = 5
+        self.last_executed_pair: Optional[str] = None
+        self.last_signal_time: Optional[str] = None
+        
         self.logger.info("Trading Bot initialized")
     
     def startup(self) -> bool:
@@ -267,16 +273,32 @@ class TradingBot:
             print(f"\n[{timestamp}] New message from {sender_name}:")
             print(f"  {safe_message}")
             
+            # Add to recent messages for context
+            self.recent_messages.append({
+                'timestamp': timestamp,
+                'sender': sender_name,
+                'text': message_text
+            })
+            if len(self.recent_messages) > self.max_context_messages:
+                self.recent_messages.pop(0)  # Remove oldest
+            
+            # Build context from recent messages (exclude current one)
+            recent_context = []
+            for msg in self.recent_messages[:-1]:  # All except current
+                recent_context.append(f"[{msg['timestamp']}] {msg['sender']}: {msg['text']}")
+            
             # Get active trades context
             active_trades = self.trade_manager.get_context_for_llm()
             
-            # Interpret message with LLM
+            # Interpret message with LLM (with context)
             print("  Analyzing with LLM...")
             system_prompt = self.config.get('llm.system_prompt')
             signal = self.llm_interpreter.interpret_message(
                 message_text,
                 active_trades=active_trades,
-                system_prompt=system_prompt
+                system_prompt=system_prompt,
+                recent_messages=recent_context,
+                last_trade_pair=self.last_executed_pair
             )
             
             if signal is None:
@@ -288,9 +310,17 @@ class TradingBot:
                 self._handle_new_signal(signal, message_text, message_id)
             
             elif isinstance(signal, ModifySignal):
+                # Sync with MT5 before modifying
+                changes = self.sync_trades_with_mt5()
+                if changes > 0:
+                    print(f"  ℹ Synced {changes} trades with MT5")
                 self._handle_modify_signal(signal, message_text)
             
             elif isinstance(signal, CloseSignal):
+                # Sync with MT5 before closing
+                changes = self.sync_trades_with_mt5()
+                if changes > 0:
+                    print(f"  ℹ Synced {changes} trades with MT5")
                 self._handle_close_signal(signal, message_text)
             
             elif isinstance(signal, NoSignal):
@@ -519,6 +549,10 @@ class TradingBot:
         if success:
             print(f"  {colorize('✓ TRADE EXECUTED', 'green')}")
             print(f"  Ticket: {ticket}")
+            
+            # Track last executed pair for context
+            self.last_executed_pair = signal.pair
+            self.last_signal_time = datetime.now().isoformat()
             
             # Create trade record
             trade_data = {
@@ -790,6 +824,69 @@ class TradingBot:
                 print("⚠ Telegram disconnected with warnings")
         
         print("\nGoodbye!")
+    
+    def sync_trades_with_mt5(self) -> int:
+        """
+        Sync trade_manager database with actual MT5 positions
+        Finds orphaned positions (in MT5 but not in DB) and ghost trades (in DB but not in MT5)
+        
+        Returns:
+            Number of changes made (positions added + trades closed)
+        """
+        if not self.mt5_client or not self.trade_manager:
+            return 0
+        
+        changes = 0
+        
+        # Get all open positions from MT5
+        mt5_positions = self.mt5_client.get_open_positions()
+        mt5_tickets = {pos['ticket']: pos for pos in mt5_positions}
+        
+        # Get bot's active trades
+        active_trades = self.trade_manager.get_active_trades()
+        bot_tickets = {trade.mt5_ticket: trade for trade in active_trades}
+        
+        # Find orphaned positions (in MT5 but not in bot DB)
+        orphaned_tickets = set(mt5_tickets.keys()) - set(bot_tickets.keys())
+        
+        for ticket in orphaned_tickets:
+            position = mt5_tickets[ticket]
+            self.logger.info(f"Found orphaned position in MT5: {ticket} ({position['symbol']})")
+            
+            # Add to database with MANUAL flag
+            trade_data = {
+                'pair': position['symbol'],
+                'action': position['type'],
+                'entry_price': position['open_price'],
+                'stop_loss': position['sl'],
+                'take_profit': position['tp'],
+                'lot_size': position['volume'],
+                'mt5_ticket': ticket,
+                'original_message': '[MANUAL TRADE - Not from Telegram]',
+                'telegram_msg_id': None,
+                'status': TradeStatus.ACTIVE.value
+            }
+            
+            self.trade_manager.add_trade(trade_data)
+            self.logger.info(f"Added orphaned position {ticket} to database")
+            changes += 1
+        
+        # Find ghost trades (in DB but not in MT5)
+        ghost_tickets = set(bot_tickets.keys()) - set(mt5_tickets.keys())
+        
+        for ticket in ghost_tickets:
+            trade = bot_tickets[ticket]
+            self.logger.info(f"Found ghost trade in DB: {ticket} ({trade.pair}) - not in MT5")
+            
+            # Mark as closed in database
+            self.trade_manager.close_trade(trade.trade_id, 0, 0)
+            self.logger.info(f"Marked ghost trade {ticket} as closed")
+            changes += 1
+        
+        if changes > 0:
+            self.logger.info(f"Sync complete: {changes} changes made")
+        
+        return changes
 
 
 class REPL:

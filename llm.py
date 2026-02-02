@@ -247,7 +247,9 @@ class LLMInterpreter:
     def interpret_message(self, 
                          message: str, 
                          active_trades: Optional[List[Dict[str, Any]]] = None,
-                         system_prompt: Optional[str] = None) -> Optional[SignalResponse]:
+                         system_prompt: Optional[str] = None,
+                         recent_messages: Optional[List[str]] = None,
+                         last_trade_pair: Optional[str] = None) -> Optional[SignalResponse]:
         """
         Interpret a telegram message to extract trading signal
         
@@ -255,6 +257,8 @@ class LLMInterpreter:
             message: Message text to interpret
             active_trades: List of active trades for context
             system_prompt: Custom system prompt (uses default if None)
+            recent_messages: List of recent messages for conversational context
+            last_trade_pair: Most recently executed trade pair
             
         Returns:
             SignalResponse object or None if interpretation failed
@@ -264,6 +268,17 @@ class LLMInterpreter:
         
         # Build context about active trades
         context = self._build_context_message(active_trades)
+        
+        # Add recent messages context if available
+        if recent_messages and len(recent_messages) > 0:
+            context += "\n\nRECENT CONVERSATION FOR CONTEXT:\n"
+            for msg in recent_messages:
+                context += f"- {msg}\n"
+        
+        # Add last trade context
+        if last_trade_pair:
+            context += f"\n\nMOST RECENT TRADE: {last_trade_pair}\n"
+            context += "(If current message refers to 'the trade' or 'it' without specifying pair, it likely means this one)\n"
         
         # Default system prompt if not provided
         if system_prompt is None:

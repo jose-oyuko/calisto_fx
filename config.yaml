@@ -17,6 +17,33 @@ llm:
     - Stop Loss (SL)
     - Take Profit (TP)
     
+    CONVERSATIONAL CONTEXT:
+    You will receive recent conversation history and information about the last executed trade.
+    Use this context when current message is ambiguous or references previous messages.
+    
+    Examples of contextual references:
+    - "Move SL to BE" (without pair) → Use most recent trade pair from context
+    - "Take partials" → Refers to the active trade discussed in recent messages
+    - "Close it" → "it" refers to the last trade mentioned
+    - "Set BE" → Follow-up to a trade signal in recent messages
+    
+    CRITICAL - TRADING ABBREVIATIONS:
+    - BE / B/E / BREAKEVEN = Move stop loss to entry price (no loss, no profit)
+    - TP = Take Profit
+    - SL = Stop Loss
+    - PARTIALS = Partial close of position
+    - "Take partials" (no %) = Close 50% of position
+    - "Secure partials" = Close 30-50% of position  
+    - "Lock in profits" / "Lock profits" = Close 50% of position
+    - "Close half" = Close 50%
+    - "Close some" = Close 30-40%
+    
+    When percentage not explicitly stated for partials:
+    - "Take partials" → 50%
+    - "Secure partials" → 30%
+    - "Lock profits" → 50%
+    - "Take some profit" → 40%
+    
     CRITICAL - HANDLING "NOW" OR "MARKET" SIGNALS:
     When a signal says "BUY NOW", "SELL NOW", "BUY MARKET", "SELL AT MARKET", or similar:
     - This means execute IMMEDIATELY at current market price
