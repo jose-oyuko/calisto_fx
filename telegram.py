@@ -83,11 +83,16 @@ class TelegramListener:
     
     async def disconnect(self):
         """Disconnect from Telegram"""
-        if self.client:
-            await self.client.disconnect()
-            self.is_connected = False
-            self.is_listening = False
-            self.logger.info("Disconnected from Telegram")
+        if self.client and self.is_connected:
+            try:
+                await self.client.disconnect()
+                self.is_connected = False
+                self.is_listening = False
+                self.logger.info("Disconnected from Telegram")
+            except Exception as e:
+                self.logger.warning(f"Error during disconnect: {e}")
+                self.is_connected = False
+                self.is_listening = False
     
     async def get_dialogs(self) -> List[Dict[str, Any]]:
         """
@@ -301,7 +306,37 @@ class TelegramClient:
     
     def disconnect(self):
         """Disconnect from Telegram"""
-        self._run_async(self.listener.disconnect())
+        if not self.listener.is_connected:
+            return
+        
+        # Stop listening first
+        self.listener.stop_listening()
+        
+        # For disconnect, we need to handle it differently if loop is running
+        try:
+            # If we're in the same thread as the loop, schedule the disconnect
+            if self.loop and self.loop.is_running():
+                # Create a task to disconnect in the running loop
+                future = asyncio.run_coroutine_threadsafe(
+                    self.listener.disconnect(), 
+                    self.loop
+                )
+                # Wait for it to complete with timeout
+                try:
+                    future.result(timeout=5.0)
+                except Exception as e:
+                    self.logger.warning(f"Error during disconnect: {e}")
+            else:
+                # Loop not running, safe to use run_until_complete
+                self._run_async(self.listener.disconnect())
+        except Exception as e:
+            self.logger.warning(f"Error disconnecting: {e}")
+            # Force close the client if disconnect fails
+            if self.listener.client:
+                try:
+                    self.listener.client.disconnect()
+                except:
+                    pass
     
     def get_dialogs(self) -> List[Dict[str, Any]]:
         """Get list of chats/groups"""
@@ -353,7 +388,7 @@ if __name__ == "__main__":
     
     print("Telegram Client Test")
     print("=" * 70)
-    print(f"the api hash is {api_hash} and api id is {api_id} and the phone is {phone}")
+    
     # Create client
     client = TelegramClient(api_id, api_hash, phone)
     

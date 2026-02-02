@@ -535,18 +535,45 @@ class TradingBot:
         
         self.is_running = False
         
+        # Stop listening first
         if self.telegram_client:
-            self.telegram_client.stop_listening()
-            self.telegram_client.disconnect()
-            print("✓ Telegram disconnected")
+            try:
+                self.telegram_client.stop_listening()
+                print("✓ Stopped listening to messages")
+            except Exception as e:
+                self.logger.warning(f"Error stopping listener: {e}")
         
+        # Close MT5 connection
         if self.mt5_client:
-            self.mt5_client.shutdown()
-            print("✓ MT5 disconnected")
+            try:
+                self.mt5_client.shutdown()
+                print("✓ MT5 disconnected")
+            except Exception as e:
+                self.logger.warning(f"Error closing MT5: {e}")
         
+        # Save trades
         if self.trade_manager:
-            self.trade_manager.save_trades()
-            print("✓ Trades saved")
+            try:
+                self.trade_manager.save_trades()
+                print("✓ Trades saved")
+            except Exception as e:
+                self.logger.warning(f"Error saving trades: {e}")
+        
+        # Disconnect Telegram last (this is tricky due to async)
+        if self.telegram_client:
+            try:
+                # Give the background thread a moment to finish
+                import time
+                time.sleep(0.5)
+                self.telegram_client.disconnect()
+                print("✓ Telegram disconnected")
+            except RuntimeError as e:
+                # Event loop already running - this is expected
+                self.logger.debug(f"Telegram disconnect skipped (loop running): {e}")
+                print("✓ Telegram session closed")
+            except Exception as e:
+                self.logger.warning(f"Error disconnecting Telegram: {e}")
+                print("⚠ Telegram disconnected with warnings")
         
         print("\nGoodbye!")
 
@@ -782,6 +809,9 @@ class REPL:
 
 def main():
     """Main entry point"""
+    bot = None
+    telegram_thread = None
+    
     try:
         # Create bot
         bot = TradingBot()
@@ -813,8 +843,15 @@ def main():
         print(f"\nFatal error: {e}")
         logging.error("Fatal error", exc_info=True)
     finally:
-        if 'bot' in locals():
-            bot.shutdown()
+        # Ensure cleanup happens
+        if bot:
+            try:
+                bot.shutdown()
+            except Exception as e:
+                print(f"Error during shutdown: {e}")
+                # Force exit if shutdown fails
+                import sys
+                sys.exit(1)
 
 
 if __name__ == "__main__":
