@@ -95,7 +95,9 @@ mt5:
   magic_number: 234567  # Unique identifier for bot trades
   slippage: 10          # Maximum slippage in points
   deviation: 5          # Maximum price deviation for order execution
-  filling_mode: "FOK"   # Fill or Kill (FOK) or Immediate or Cancel (IOC)
+  
+  # Note: Filling mode is auto-detected. Bot tries FOK, IOC, then RETURN
+  # Different symbols/brokers support different modes
   
   # Order type settings
   order_comment: "TelegramBot"  # Comment added to all orders

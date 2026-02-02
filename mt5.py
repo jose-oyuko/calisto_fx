@@ -216,44 +216,71 @@ class MT5Client:
         if take_profit > 0:
             take_profit = round(take_profit, digits)
         
-        # Prepare order request
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": lot_size,
-            "type": trade_type,
-            "price": price,
-            "sl": stop_loss,
-            "tp": take_profit,
-            "deviation": deviation,
-            "magic": self.magic_number,
-            "comment": comment,
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,  # Immediate or Cancel
+        # Try different filling modes in order of preference
+        filling_modes = [
+            mt5.ORDER_FILLING_FOK,    # Fill or Kill (most common)
+            mt5.ORDER_FILLING_IOC,    # Immediate or Cancel
+            mt5.ORDER_FILLING_RETURN, # Return (for exchange execution)
+        ]
+        
+        filling_names = {
+            mt5.ORDER_FILLING_FOK: "FOK",
+            mt5.ORDER_FILLING_IOC: "IOC", 
+            mt5.ORDER_FILLING_RETURN: "RETURN"
         }
         
-        # Send order
-        self.logger.info(f"Placing {order_type} order: {symbol} {lot_size} lots @ {price}")
-        result = mt5.order_send(request)
+        last_error_msg = ""
         
-        if result is None:
-            error = mt5.last_error()
-            msg = f"Order send failed: {error}"
-            self.logger.error(msg)
-            return False, None, msg
+        for filling_mode in filling_modes:
+            # Prepare order request
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": lot_size,
+                "type": trade_type,
+                "price": price,
+                "sl": stop_loss,
+                "tp": take_profit,
+                "deviation": deviation,
+                "magic": self.magic_number,
+                "comment": comment,
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling_mode,
+            }
+            
+            # Send order
+            self.logger.info(f"Placing {order_type} order: {symbol} {lot_size} lots @ {price} (filling: {filling_names[filling_mode]})")
+            result = mt5.order_send(request)
+            
+            if result is None:
+                error = mt5.last_error()
+                last_error_msg = f"Order send failed: {error}"
+                self.logger.warning(f"{last_error_msg}, trying next filling mode...")
+                continue
+            
+            # Check result
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                # Success!
+                ticket = result.order
+                msg = f"Order executed successfully - Ticket: {ticket}, Price: {result.price}, Filling: {filling_names[filling_mode]}"
+                self.logger.info(msg)
+                return True, ticket, msg
+            
+            elif result.retcode == 10030:  # Unsupported filling mode
+                last_error_msg = f"Filling mode {filling_names[filling_mode]} not supported"
+                self.logger.warning(f"{last_error_msg}, trying next...")
+                continue
+            
+            else:
+                # Other error - don't try other filling modes
+                last_error_msg = f"Order failed with retcode: {result.retcode} - {result.comment}"
+                self.logger.error(last_error_msg)
+                return False, None, last_error_msg
         
-        # Check result
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            msg = f"Order failed with retcode: {result.retcode} - {result.comment}"
-            self.logger.error(msg)
-            return False, None, msg
-        
-        # Success
-        ticket = result.order
-        msg = f"Order executed successfully - Ticket: {ticket}, Price: {result.price}"
-        self.logger.info(msg)
-        
-        return True, ticket, msg
+        # All filling modes failed
+        msg = f"All filling modes failed. Last error: {last_error_msg}"
+        self.logger.error(msg)
+        return False, None, msg
     
     def place_pending_order(self,
                            symbol: str,
@@ -687,5 +714,5 @@ if __name__ == "__main__":
     print("✓ MT5 connection closed")
     
     print("\n" + "=" * 50)
-    print("Note: Full testing requires MT5 credentials")
-    print("Uncomment the test section and provide credentials")
+    # print("Note: Full testing requires MT5 credentials")
+    # print("Uncomment the test section and provide credentials")
