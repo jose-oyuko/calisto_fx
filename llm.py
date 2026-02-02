@@ -298,7 +298,10 @@ Use the provided tools to report your findings. Always provide your confidence l
         
         try:
             # Call Claude with tools
-            self.logger.info(f"Interpreting message: {message[:100]}...")
+            # Sanitize message for logging to avoid Unicode errors on Windows
+            from utils import sanitize_for_logging
+            safe_message = sanitize_for_logging(message, max_length=100)
+            self.logger.info(f"Interpreting message: {safe_message}")
             
             response = self.client.messages.create(
                 model=self.model,

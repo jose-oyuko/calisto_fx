@@ -92,15 +92,25 @@ def setup_logging(config: Config) -> logging.Logger:
     logger = logging.getLogger('TradingBot')
     logger.setLevel(log_level)
     
-    # Console handler
+    # Console handler with UTF-8 encoding
     if config.get('logging.console', True):
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(logging.Formatter(log_format))
+        # Force UTF-8 encoding for console to handle emojis/unicode
+        if hasattr(console_handler.stream, 'reconfigure'):
+            try:
+                console_handler.stream.reconfigure(encoding='utf-8', errors='replace')
+            except Exception:
+                pass  # Fallback if reconfigure fails
         logger.addHandler(console_handler)
     
-    # File handler
+    # File handler with UTF-8 encoding
     if config.get('logging.file', True):
-        file_handler = logging.FileHandler(config.get('logging.file_path'))
+        file_handler = logging.FileHandler(
+            config.get('logging.file_path'),
+            encoding='utf-8',
+            errors='replace'
+        )
         file_handler.setFormatter(logging.Formatter(log_format))
         logger.addHandler(file_handler)
     
@@ -291,6 +301,33 @@ def colorize(text: str, color: str) -> str:
     reset_code = colors['reset']
     
     return f"{color_code}{text}{reset_code}"
+
+
+def sanitize_for_logging(text: str, max_length: int = 200) -> str:
+    """
+    Sanitize text for safe logging (remove problematic Unicode characters)
+    
+    Args:
+        text: Text to sanitize
+        max_length: Maximum length to keep
+        
+    Returns:
+        Sanitized text safe for logging
+    """
+    # Truncate if too long
+    if len(text) > max_length:
+        text = text[:max_length] + '...'
+    
+    # Replace problematic characters with safe alternatives
+    # This handles emojis and other Unicode characters that might cause encoding issues
+    try:
+        # Try to encode as ASCII, replacing non-ASCII characters
+        text = text.encode('ascii', errors='replace').decode('ascii')
+    except Exception:
+        # If that fails, just remove problematic characters
+        text = ''.join(char if ord(char) < 128 else '?' for char in text)
+    
+    return text
 
 
 def print_trade_summary(trade_data: Dict[str, Any], color: bool = True) -> None:

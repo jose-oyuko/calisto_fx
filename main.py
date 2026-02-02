@@ -11,6 +11,20 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from getpass import getpass
 
+# Fix for Windows Unicode/emoji handling in console
+if sys.platform == 'win32':
+    # Try to set UTF-8 mode for Windows console
+    try:
+        # For Python 3.7+
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass  # Silently fail if not supported
+    
+    # Set environment variable for UTF-8
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+
 # Import our modules
 from utils import Config, setup_logging, colorize, print_trade_summary, validate_lot_size, calculate_risk_reward
 from trade_manager import TradeManager, TradeStatus
@@ -246,10 +260,12 @@ class TradingBot:
             message_id = message_data.get('message_id')
             sender_name = message_data.get('sender_name', 'Unknown')
             
-            # Display incoming message
+            # Display incoming message (sanitize for Windows console)
+            from utils import sanitize_for_logging
             timestamp = datetime.now().strftime("%H:%M:%S")
+            safe_message = sanitize_for_logging(message_text, max_length=100)
             print(f"\n[{timestamp}] New message from {sender_name}:")
-            print(f"  {message_text[:100]}{'...' if len(message_text) > 100 else ''}")
+            print(f"  {safe_message}")
             
             # Get active trades context
             active_trades = self.trade_manager.get_context_for_llm()
