@@ -1,0 +1,108 @@
+# Configuration for Telegram Trading Bot
+
+# LLM Configuration
+llm:
+  model: "claude-sonnet-4-20250514"
+  max_tokens: 2000
+  temperature: 0.1
+  
+  # System prompt for signal interpretation
+  system_prompt: |
+    You are an expert trading signal interpreter. Your job is to analyze messages from a Telegram trading group and determine if they contain valid trading signals.
+    
+    A valid trading signal must include:
+    - Currency pair (e.g., EURUSD, GBPUSD, XAUUSD)
+    - Direction (BUY/SELL or LONG/SHORT)
+    - Entry price or range
+    - Stop Loss (SL)
+    - Take Profit (TP)
+    
+    You must output structured JSON data using the provided tools.
+    
+    When analyzing messages, consider:
+    1. Is this a NEW trading signal?
+    2. Is this a MODIFICATION to an existing trade (e.g., "move SL to breakeven")?
+    3. Is this a CLOSE instruction (e.g., "close 50% of position")?
+    4. Or is this just noise/commentary?
+    
+    Always provide your reasoning and confidence level.
+  
+  # Few-shot examples to include in context
+  examples:
+    - input: "EURUSD BUY at 1.0850, SL 1.0800, TP 1.0950"
+      output: |
+        {
+          "signal_type": "new_signal",
+          "pair": "EURUSD",
+          "action": "BUY",
+          "entry_price": 1.0850,
+          "stop_loss": 1.0800,
+          "take_profit": 1.0950,
+          "execution_type": "immediate",
+          "confidence": 0.95,
+          "reasoning": "Clear trading signal with all required parameters"
+        }
+    
+    - input: "Gold looking bullish today, might see a move up"
+      output: |
+        {
+          "signal_type": "none",
+          "confidence": 0.9,
+          "reasoning": "This is market commentary, not a trading signal with specific entry/exit levels"
+        }
+    
+    - input: "Move SL to breakeven on the EUR trade"
+      output: |
+        {
+          "signal_type": "modify",
+          "action_type": "modify_sl",
+          "reasoning": "Instruction to move stop loss to entry price (breakeven) for EUR position"
+        }
+
+# MT5 Configuration
+mt5:
+  magic_number: 234567  # Unique identifier for bot trades
+  slippage: 10          # Maximum slippage in points
+  deviation: 5          # Maximum price deviation for order execution
+  filling_mode: "FOK"   # Fill or Kill (FOK) or Immediate or Cancel (IOC)
+  
+  # Order type settings
+  order_comment: "TelegramBot"  # Comment added to all orders
+  
+# Risk Management
+risk:
+  max_lot_size: 1.0          # Maximum lot size per trade
+  min_lot_size: 0.01         # Minimum lot size
+  default_lot_size: 0.1      # Default if not specified in signal
+  max_open_trades: 5         # Maximum concurrent trades
+  max_daily_trades: 10       # Maximum trades per day
+  
+  # Risk-reward validation
+  min_risk_reward_ratio: 1.0  # Minimum RR ratio (1:1)
+  require_stop_loss: true     # Reject trades without SL
+  require_take_profit: true   # Reject trades without TP
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  console: true
+  file: true
+  file_path: "logs/trading_bot.log"
+  
+  # Separate file for trade-specific logs
+  trades_file: "logs/trades.log"
+
+# Application Settings
+app:
+  # Persistence
+  trades_file: "data/trades.json"
+  
+  # Message processing
+  process_historical: false  # Process old messages on startup
+  message_delay: 1           # Seconds to wait between processing messages
+  
+  # REPL settings
+  repl_prompt: "TradingBot> "
+  show_timestamps: true
+  color_output: true
