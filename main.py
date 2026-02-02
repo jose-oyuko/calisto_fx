@@ -379,8 +379,7 @@ class TradingBot:
             )
             
         elif signal.execution_type == "pending":
-            # Pending order execution
-            # Get current price to determine execution strategy
+            # Pending order execution with RANGE support
             symbol_info = self.mt5_client.get_symbol_info(signal.pair)
             
             if symbol_info is None:
@@ -393,51 +392,99 @@ class TradingBot:
             print(f"  ℹ Signal entry price: {signal.entry_price}")
             print(f"  ℹ Action: {signal.action}")
             
-            # Determine execution strategy based on price relationship
+            # Try to detect if this is a RANGE signal by checking original message
+            is_range = False
+            range_lower = None
+            range_upper = None
+            
+            # Look for range patterns in original message
+            import re
+            range_patterns = [
+                r'range[:\s]+(\d+\.?\d*)\s*[-to]+\s*(\d+\.?\d*)',
+                r'zone[:\s]+(\d+\.?\d*)\s*[-to]+\s*(\d+\.?\d*)',
+                r'(\d+\.?\d*)\s*[-]+\s*(\d+\.?\d*)',
+            ]
+            
+            for pattern in range_patterns:
+                match = re.search(pattern, original_message.lower())
+                if match:
+                    val1 = float(match.group(1))
+                    val2 = float(match.group(2))
+                    range_lower = min(val1, val2)
+                    range_upper = max(val1, val2)
+                    is_range = True
+                    print(f"  ℹ Detected range: {range_lower} - {range_upper}")
+                    break
+            
+            # Determine execution strategy
             execute_now = False
+            entry_price = signal.entry_price
             pending_type = None
             
-            if signal.action == "BUY":
-                # BUY logic:
-                # - If current price == entry: execute at market
-                # - If current price < entry: place BUY_STOP (wait for price to rise TO entry)
-                # - If current price > entry: place BUY_LIMIT (wait for price to drop TO entry)
+            if is_range:
+                # RANGE LOGIC - Per user's specifications
+                print(f"  ℹ Processing as RANGE signal")
                 
-                if abs(current_price - signal.entry_price) < (symbol_info['point'] * 10):
-                    # Price is at entry (within 10 points)
+                # Check if current price is within range
+                if range_lower <= current_price <= range_upper:
+                    # Price is INSIDE range - execute at market NOW
                     execute_now = True
-                    print(f"  ℹ Price at entry level - executing at market")
-                elif current_price < signal.entry_price:
-                    # Current below entry - wait for price to RISE
-                    pending_type = "BUY_STOP"
-                    print(f"  ℹ Price below entry ({current_price} < {signal.entry_price})")
-                    print(f"  ℹ Placing BUY_STOP - triggers when price rises to {signal.entry_price}")
-                else:
-                    # Current above entry - wait for price to FALL  
-                    pending_type = "BUY_LIMIT"
-                    print(f"  ℹ Price above entry ({current_price} > {signal.entry_price})")
-                    print(f"  ℹ Placing BUY_LIMIT - triggers when price drops to {signal.entry_price}")
+                    print(f"  ℹ Price INSIDE range ({range_lower}-{range_upper}) - executing at market")
                     
-            else:  # SELL
-                # SELL logic:
-                # - If current price == entry: execute at market
-                # - If current price > entry: place SELL_STOP (wait for price to fall TO entry)
-                # - If current price < entry: place SELL_LIMIT (wait for price to rise TO entry)
+                elif signal.action == "SELL":
+                    # SELL RANGE logic
+                    if current_price > range_upper:
+                        # Price ABOVE range - use UPPER limit
+                        entry_price = range_upper
+                        pending_type = "SELL_STOP"
+                        print(f"  ℹ SELL: Price above range - SELL_STOP at {entry_price} (upper limit)")
+                    else:
+                        # Price BELOW range - use LOWER limit
+                        entry_price = range_lower
+                        pending_type = "SELL_LIMIT"
+                        print(f"  ℹ SELL: Price below range - SELL_LIMIT at {entry_price} (lower limit)")
+                        
+                else:  # BUY
+                    # BUY RANGE logic
+                    if current_price < range_lower:
+                        # Price BELOW range - use LOWER limit
+                        entry_price = range_lower
+                        pending_type = "BUY_STOP"
+                        print(f"  ℹ BUY: Price below range - BUY_STOP at {entry_price} (lower limit)")
+                    else:
+                        # Price ABOVE range - use UPPER limit
+                        entry_price = range_upper
+                        pending_type = "BUY_LIMIT"
+                        print(f"  ℹ BUY: Price above range - BUY_LIMIT at {entry_price} (upper limit)")
+            
+            else:
+                # SINGLE ENTRY PRICE logic (not a range)
+                print(f"  ℹ Processing as SINGLE entry point signal")
                 
-                if abs(current_price - signal.entry_price) < (symbol_info['point'] * 10):
-                    # Price is at entry
+                # Check if price is at entry (within 10 points)
+                if abs(current_price - entry_price) < (symbol_info['point'] * 10):
                     execute_now = True
                     print(f"  ℹ Price at entry level - executing at market")
-                elif current_price > signal.entry_price:
-                    # Current above entry - wait for price to FALL
-                    pending_type = "SELL_STOP"
-                    print(f"  ℹ Price above entry ({current_price} > {signal.entry_price})")
-                    print(f"  ℹ Placing SELL_STOP - triggers when price drops to {signal.entry_price}")
-                else:
-                    # Current below entry - wait for price to RISE
-                    pending_type = "SELL_LIMIT"
-                    print(f"  ℹ Price below entry ({current_price} < {signal.entry_price})")
-                    print(f"  ℹ Placing SELL_LIMIT - triggers when price rises to {signal.entry_price}")
+                    
+                elif signal.action == "BUY":
+                    if current_price < entry_price:
+                        # Price below entry - wait for rise
+                        pending_type = "BUY_STOP"
+                        print(f"  ℹ BUY: Price below entry - BUY_STOP at {entry_price}")
+                    else:
+                        # Price above entry - wait for drop
+                        pending_type = "BUY_LIMIT"
+                        print(f"  ℹ BUY: Price above entry - BUY_LIMIT at {entry_price}")
+                        
+                else:  # SELL
+                    if current_price > entry_price:
+                        # Price above entry - wait for drop
+                        pending_type = "SELL_STOP"
+                        print(f"  ℹ SELL: Price above entry - SELL_STOP at {entry_price}")
+                    else:
+                        # Price below entry - wait for rise
+                        pending_type = "SELL_LIMIT"
+                        print(f"  ℹ SELL: Price below entry - SELL_LIMIT at {entry_price}")
             
             # Execute based on strategy
             if execute_now:
@@ -456,7 +503,7 @@ class TradingBot:
                     symbol=signal.pair,
                     order_type=pending_type,
                     lot_size=lot_size,
-                    entry_price=signal.entry_price,
+                    entry_price=entry_price,
                     stop_loss=signal.stop_loss,
                     take_profit=signal.take_profit,
                     comment=self.config.get('mt5.order_comment', 'TelegramBot')
