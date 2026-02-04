@@ -262,7 +262,7 @@ mt5:
 risk:
   max_lot_size: 5.0 # Maximum lot size per trade
   min_lot_size: 0.01 # Minimum lot size
-  default_lot_size: 0.1 # Default if not specified in signal
+  default_lot_size: 3.0 # Default if not specified in signal
   max_open_trades: 5 # Maximum concurrent trades
   max_daily_trades: 10 # Maximum trades per day
 

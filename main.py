@@ -337,6 +337,12 @@ class TradingBot:
     def _handle_new_signal(self, signal: NewSignal, original_message: str, message_id: int):
         """Handle new trading signal"""
         print(f"\n  {colorize('📊 NEW SIGNAL DETECTED', 'cyan')}")
+        
+        # Default to XAUUSD if pair missing or generic
+        if not signal.pair or signal.pair.upper() in ['GOLD', 'XAU', '']:
+            signal.pair = 'XAUUSD'
+            print(f"  ℹ No specific pair - defaulting to XAUUSD (Gold)")
+        
         print(f"  Pair: {signal.pair}")
         print(f"  Action: {colorize(signal.action, 'green' if signal.action == 'BUY' else 'red')}")
         
@@ -377,7 +383,7 @@ class TradingBot:
         take_profit = signal.take_profit or 0.0
         
         # Determine lot size
-        lot_size = signal.lot_size or self.config.get('risk.default_lot_size', 3.0)
+        lot_size = signal.lot_size or self.config.get('risk.default_lot_size', 0.1)
         
         # Validate lot size
         is_valid, error_msg = validate_lot_size(lot_size, self.config)
@@ -617,7 +623,65 @@ class TradingBot:
         if changes > 0:
             print(f"  ℹ Synced {changes} trades with MT5")
         
-        # Execute each action in sequence
+        # Check if this is a "close all" signal
+        close_all_keywords = [
+            'no longer in this trade',
+            'position closed',
+            'trade closed', 
+            'close all',
+            'exit all'
+        ]
+        is_close_all = any(keyword in original_message.lower() for keyword in close_all_keywords)
+        
+        if is_close_all:
+            print(f"\n  {colorize('🚨 CLOSE ALL DETECTED - Closing all positions and pending orders', 'yellow')}")
+            
+            # Get all active trades
+            active_trades = self.trade_manager.get_active_trades()
+            
+            # Get all pending orders from MT5
+            pending_orders = self.mt5_client.get_pending_orders()
+            
+            total_to_close = len(active_trades) + len(pending_orders)
+            
+            if total_to_close == 0:
+                print(f"  ℹ No active trades or pending orders to close")
+                return
+            
+            print(f"  ℹ Found {len(active_trades)} active trades and {len(pending_orders)} pending orders")
+            
+            # Close all active positions
+            for trade in active_trades:
+                print(f"\n  Closing: {trade.action} {trade.pair} (Ticket: {trade.mt5_ticket})")
+                success, close_price, message = self.mt5_client.close_order(
+                    ticket=trade.mt5_ticket,
+                    deviation=self.config.get('mt5.deviation', 5)
+                )
+                if success:
+                    print(f"  ✓ Closed at {close_price}")
+                    self.trade_manager.close_trade(trade.trade_id, close_price or 0, 0)
+                else:
+                    print(f"  ⚠ {message}")
+            
+            # Cancel all pending orders
+            for order in pending_orders:
+                print(f"\n  Canceling pending: {order['type']} {order['symbol']} @ {order['entry_price']}")
+                # MT5 cancels pending orders by deleting them
+                success = self.mt5_client.cancel_pending_order(order['ticket'])
+                if success:
+                    print(f"  ✓ Cancelled ticket {order['ticket']}")
+                    # Mark as closed in DB if we're tracking it
+                    for trade in self.trade_manager.trades:
+                        if trade.mt5_ticket == order['ticket']:
+                            self.trade_manager.close_trade(trade.trade_id, 0, 0)
+                            break
+                else:
+                    print(f"  ⚠ Failed to cancel")
+            
+            print(f"\n  {colorize('✓ All positions and orders closed/cancelled', 'green')}")
+            return
+        
+        # Execute each action in sequence (normal multi-action flow)
         for i, action_dict in enumerate(signal.actions, 1):
             action_type = action_dict.get('type')
             details = action_dict.get('details', {})
@@ -1049,6 +1113,14 @@ class REPL:
             self.cmd_stats()
         elif cmd == 'sync':
             self.cmd_sync()
+        elif cmd == 'setlot':
+            self.cmd_setlot(*args)
+        elif cmd == 'lot':
+            self.cmd_lot()
+        elif cmd == 'minlot':
+            self.cmd_minlot(*args)
+        elif cmd == 'maxlot':
+            self.cmd_maxlot(*args)
         elif cmd == 'exit' or cmd == 'quit':
             self.running = False
         else:
@@ -1064,6 +1136,13 @@ class REPL:
         print("  trades      - Show recent trade history")
         print("  close <id>  - Manually close a trade by ticket or trade_id")
         print("  stats       - Show trading statistics")
+        print("")
+        print("  Risk Management:")
+        print("    lot         - Show current lot size settings")
+        print("    setlot <size> - Set default lot size (e.g., 'setlot 0.2')")
+        print("    minlot <size> - Set minimum lot size (e.g., 'minlot 0.01')")
+        print("    maxlot <size> - Set maximum lot size (e.g., 'maxlot 5.0')")
+        print("")
         print("  sync        - Sync trade manager with MT5 (close trades that no longer exist)")
         print("  pause       - Pause message processing")
         print("  resume      - Resume message processing")
@@ -1215,6 +1294,125 @@ class REPL:
             self.bot.trade_manager.close_trade(trade.trade_id, close_price, 0.0)
         else:
             print(f"{colorize('✗ Failed to close', 'red')}: {message}")
+    
+    def cmd_setlot(self, *args):
+        """Change default lot size"""
+        if not args:
+            # Show current lot size
+            current_lot = self.bot.config.get('risk.default_lot_size', 0.1)
+            min_lot = self.bot.config.get('risk.min_lot_size', 0.01)
+            max_lot = self.bot.config.get('risk.max_lot_size', 100.0)
+            print(f"\nCurrent default lot size: {current_lot}")
+            print(f"Allowed range: {min_lot} - {max_lot}")
+            print(f"\nUsage: setlot <size>")
+            print(f"Example: setlot 0.2")
+            return
+        
+        try:
+            new_lot_size = float(args[0])
+            
+            # Validate lot size
+            min_lot = self.bot.config.get('risk.min_lot_size', 0.01)
+            max_lot = self.bot.config.get('risk.max_lot_size', 100.0)
+            
+            if new_lot_size < min_lot:
+                print(f"✗ Lot size too small. Minimum: {min_lot}")
+                return
+            
+            if new_lot_size > max_lot:
+                print(f"✗ Lot size too large. Maximum: {max_lot}")
+                return
+            
+            # Update config (in-memory, not saved to file)
+            old_lot = self.bot.config.get('risk.default_lot_size', 0.1)
+            self.bot.config.config['risk']['default_lot_size'] = new_lot_size
+            
+            print(f"\n{colorize('✓ Default lot size updated', 'green')}")
+            print(f"  Old: {old_lot}")
+            print(f"  New: {new_lot_size}")
+            print(f"\n  ℹ This change is temporary (only for current session)")
+            print(f"  💡 To make it permanent, edit 'risk.default_lot_size' in config.yaml")
+            
+        except ValueError:
+            print(f"✗ Invalid lot size. Must be a number (e.g., 0.1, 0.5, 1.0)")
+    
+    def cmd_lot(self):
+        """Show current lot size settings"""
+        current_lot = self.bot.config.get('risk.default_lot_size', 0.1)
+        min_lot = self.bot.config.get('risk.min_lot_size', 0.01)
+        max_lot = self.bot.config.get('risk.max_lot_size', 100.0)
+        
+        print(f"\n{colorize('Current Lot Size Settings:', 'cyan')}")
+        print(f"  Default lot size: {colorize(str(current_lot), 'green')}")
+        print(f"  Minimum lot size: {min_lot}")
+        print(f"  Maximum lot size: {max_lot}")
+        print(f"\n  💡 Use 'setlot <size>' to change default")
+        print(f"  💡 Use 'minlot <size>' to change minimum")
+        print(f"  💡 Use 'maxlot <size>' to change maximum\n")
+    
+    def cmd_minlot(self, *args):
+        """Change minimum lot size"""
+        if not args:
+            current = self.bot.config.get('risk.min_lot_size', 0.01)
+            print(f"\nCurrent minimum lot size: {current}")
+            print(f"Usage: minlot <size>")
+            print(f"Example: minlot 0.01")
+            return
+        
+        try:
+            new_min = float(args[0])
+            
+            if new_min <= 0:
+                print(f"✗ Minimum lot size must be greater than 0")
+                return
+            
+            max_lot = self.bot.config.get('risk.max_lot_size', 100.0)
+            if new_min > max_lot:
+                print(f"✗ Minimum ({new_min}) cannot be greater than maximum ({max_lot})")
+                return
+            
+            old_min = self.bot.config.get('risk.min_lot_size', 0.01)
+            self.bot.config.config['risk']['min_lot_size'] = new_min
+            
+            print(f"\n{colorize('✓ Minimum lot size updated', 'green')}")
+            print(f"  Old: {old_min}")
+            print(f"  New: {new_min}")
+            print(f"\n  ℹ This change is temporary (only for current session)")
+            
+        except ValueError:
+            print(f"✗ Invalid size. Must be a number")
+    
+    def cmd_maxlot(self, *args):
+        """Change maximum lot size"""
+        if not args:
+            current = self.bot.config.get('risk.max_lot_size', 100.0)
+            print(f"\nCurrent maximum lot size: {current}")
+            print(f"Usage: maxlot <size>")
+            print(f"Example: maxlot 5.0")
+            return
+        
+        try:
+            new_max = float(args[0])
+            
+            if new_max <= 0:
+                print(f"✗ Maximum lot size must be greater than 0")
+                return
+            
+            min_lot = self.bot.config.get('risk.min_lot_size', 0.01)
+            if new_max < min_lot:
+                print(f"✗ Maximum ({new_max}) cannot be less than minimum ({min_lot})")
+                return
+            
+            old_max = self.bot.config.get('risk.max_lot_size', 100.0)
+            self.bot.config.config['risk']['max_lot_size'] = new_max
+            
+            print(f"\n{colorize('✓ Maximum lot size updated', 'green')}")
+            print(f"  Old: {old_max}")
+            print(f"  New: {new_max}")
+            print(f"\n  ℹ This change is temporary (only for current session)")
+            
+        except ValueError:
+            print(f"✗ Invalid size. Must be a number")
     
     def cmd_pause(self):
         """Pause message processing"""
