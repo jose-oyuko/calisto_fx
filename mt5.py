@@ -409,6 +409,41 @@ class MT5Client:
         
         return None  # Should execute at market
     
+    def cancel_pending_order(self, ticket: int) -> bool:
+        """
+        Cancel a pending order
+        
+        Args:
+            ticket: Order ticket number to cancel
+            
+        Returns:
+            True if successfully cancelled, False otherwise
+        """
+        if not self.check_connection():
+            return False
+        
+        # Prepare delete request
+        request = {
+            "action": mt5.TRADE_ACTION_REMOVE,
+            "order": ticket,
+        }
+        
+        # Send cancel request
+        self.logger.info(f"Cancelling pending order {ticket}")
+        result = mt5.order_send(request)
+        
+        if result is None:
+            error = mt5.last_error()
+            self.logger.error(f"Failed to cancel order {ticket}: {error}")
+            return False
+        
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            self.logger.error(f"Failed to cancel order {ticket}: {result.retcode} - {result.comment}")
+            return False
+        
+        self.logger.info(f"Order {ticket} cancelled successfully")
+        return True
+    
     def modify_order(self, 
                     ticket: int,
                     stop_loss: Optional[float] = None,
@@ -451,6 +486,48 @@ class MT5Client:
         stop_loss = round(stop_loss, digits) if stop_loss > 0 else 0.0
         take_profit = round(take_profit, digits) if take_profit > 0 else 0.0
         
+        # Check if there are actual changes
+        current_sl = round(position.sl, digits) if position.sl > 0 else 0.0
+        current_tp = round(position.tp, digits) if position.tp > 0 else 0.0
+        
+        if stop_loss == current_sl and take_profit == current_tp:
+            msg = f"No changes needed - SL and TP already at requested values"
+            self.logger.info(msg)
+            return True, msg
+        
+        # Validate stops level (minimum distance from current price)
+        point = symbol_info['point']
+        stops_level = symbol_info.get('stops_level', 0)
+        
+        if stops_level > 0 and stop_loss > 0:
+            min_distance = stops_level * point
+            current_bid = symbol_info['bid']
+            current_ask = symbol_info['ask']
+            
+            if position.type == mt5.ORDER_TYPE_BUY:
+                # For BUY: SL must be below current bid by at least stops_level
+                min_sl = current_bid - min_distance
+                if stop_loss > min_sl:
+                    old_sl = stop_loss
+                    stop_loss = round(min_sl, digits)
+                    self.logger.warning(f"SL {old_sl} too close to market {current_bid}. Adjusted to {stop_loss} (min distance: {min_distance:.2f})")
+            else:
+                # For SELL: SL must be above current ask by at least stops_level
+                min_sl = current_ask + min_distance
+                if stop_loss < min_sl:
+                    old_sl = stop_loss
+                    stop_loss = round(min_sl, digits)
+                    self.logger.warning(f"SL {old_sl} too close to market {current_ask}. Adjusted to {stop_loss} (min distance: {min_distance:.2f})")
+        
+        # Log what's changing
+        changes = []
+        if stop_loss != current_sl:
+            changes.append(f"SL: {current_sl} → {stop_loss}")
+        if take_profit != current_tp:
+            changes.append(f"TP: {current_tp} → {take_profit}")
+        
+        self.logger.info(f"Modifying position {ticket}: {', '.join(changes)}")
+        
         # Prepare modification request
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
@@ -461,7 +538,6 @@ class MT5Client:
         }
         
         # Send modification
-        self.logger.info(f"Modifying position {ticket}: SL={stop_loss}, TP={take_profit}")
         result = mt5.order_send(request)
         
         if result is None:
@@ -470,12 +546,18 @@ class MT5Client:
             self.logger.error(msg)
             return False, msg
         
+        if result.retcode == 10025:
+            # "No changes" error - values are already correct
+            msg = f"Position already has these values (this is OK)"
+            self.logger.info(msg)
+            return True, msg
+        
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             msg = f"Modification failed with retcode: {result.retcode} - {result.comment}"
             self.logger.error(msg)
             return False, msg
         
-        msg = f"Position {ticket} modified successfully"
+        msg = f"Position {ticket} modified: {', '.join(changes)}"
         self.logger.info(msg)
         return True, msg
     
@@ -697,16 +779,31 @@ class MT5Client:
         Returns:
             Tuple of (exists, location) where location is 'position', 'pending', or 'none'
         """
+        if not self.check_connection():
+            self.logger.warning("Not connected to MT5")
+            return False, 'none'
+        
         # Check open positions
-        positions = mt5.positions_get(ticket=ticket)
-        if positions and len(positions) > 0:
-            return True, 'position'
+        try:
+            positions = mt5.positions_get(ticket=ticket)
+            self.logger.debug(f"Checking ticket {ticket} in positions: {positions}")
+            if positions is not None and len(positions) > 0:
+                self.logger.info(f"Ticket {ticket} found in open positions")
+                return True, 'position'
+        except Exception as e:
+            self.logger.error(f"Error checking positions for {ticket}: {e}")
         
         # Check pending orders
-        orders = mt5.orders_get(ticket=ticket)
-        if orders and len(orders) > 0:
-            return True, 'pending'
+        try:
+            orders = mt5.orders_get(ticket=ticket)
+            self.logger.debug(f"Checking ticket {ticket} in orders: {orders}")
+            if orders is not None and len(orders) > 0:
+                self.logger.info(f"Ticket {ticket} found in pending orders")
+                return True, 'pending'
+        except Exception as e:
+            self.logger.error(f"Error checking orders for {ticket}: {e}")
         
+        self.logger.warning(f"Ticket {ticket} not found in positions or orders")
         return False, 'none'
 
 
