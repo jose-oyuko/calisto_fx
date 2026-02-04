@@ -35,8 +35,8 @@ class NewTradeAction(BaseModel):
     pair: str = Field(description="Trading pair")
     action: str = Field(description="BUY or SELL")
     entry_price: float = Field(description="Entry price (0 for market)")
-    stop_loss: float = Field(description="Stop loss price")
-    take_profit: float = Field(description="Take profit price")
+    stop_loss: Optional[float] = Field(None, description="Stop loss price (can be added later)")
+    take_profit: Optional[float] = Field(None, description="Take profit price (can be added later)")
     lot_size: Optional[float] = Field(None, description="Lot size")
     execution_type: str = Field("immediate", description="immediate or pending")
 
@@ -54,11 +54,11 @@ class MultiActionSignal(BaseModel):
 class NewSignal(BaseModel):
     """Schema for a new trading signal"""
     signal_type: str = Field(default="new_signal", description="Type of signal")
-    pair: str = Field(..., description="Trading pair (e.g., EURUSD)")
+    pair: str = Field(default="XAUUSD", description="Trading pair (defaults to XAUUSD/Gold)")
     action: str = Field(..., description="BUY or SELL")
     entry_price: float = Field(..., description="Entry price")
-    stop_loss: float = Field(..., description="Stop loss price")
-    take_profit: float = Field(..., description="Take profit price")
+    stop_loss: Optional[float] = Field(None, description="Stop loss price (can be added later)")
+    take_profit: Optional[float] = Field(None, description="Take profit price (can be added later)")
     lot_size: Optional[float] = Field(None, description="Position size in lots")
     execution_type: str = Field(default="immediate", description="immediate, pending, or conditional")
     confidence: float = Field(..., description="Confidence score 0-1")
@@ -135,7 +135,7 @@ class LLMInterpreter:
                     "properties": {
                         "pair": {
                             "type": "string",
-                            "description": "Trading pair (e.g., EURUSD, GBPUSD, XAUUSD)"
+                            "description": "Trading pair (defaults to XAUUSD if not specified)"
                         },
                         "action": {
                             "type": "string",
@@ -148,11 +148,11 @@ class LLMInterpreter:
                         },
                         "stop_loss": {
                             "type": "number",
-                            "description": "Stop loss price"
+                            "description": "Stop loss price (optional - can be added in follow-up message)"
                         },
                         "take_profit": {
                             "type": "number",
-                            "description": "Take profit price"
+                            "description": "Take profit price (optional - can be added in follow-up message)"
                         },
                         "lot_size": {
                             "type": "number",
@@ -172,7 +172,7 @@ class LLMInterpreter:
                             "description": "Explanation of the interpretation"
                         }
                     },
-                    "required": ["pair", "action", "entry_price", "stop_loss", "take_profit", "confidence", "reasoning"]
+                    "required": ["action", "entry_price", "confidence", "reasoning"]
                 }
             },
             {

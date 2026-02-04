@@ -359,8 +359,25 @@ class TradingBot:
         print(f"  Confidence: {signal.confidence:.0%}")
         print(f"  Reasoning: {signal.reasoning}")
         
+        # Check if SL/TP are missing
+        if signal.stop_loss is None or signal.take_profit is None:
+            print(f"\n  {colorize('⚠ WARNING: Trade without protection!', 'yellow')}")
+            if signal.stop_loss is None:
+                print(f"  ⚠ No Stop Loss specified - trade will be unprotected")
+            if signal.take_profit is None:
+                print(f"  ⚠ No Take Profit specified")
+            print(f"  ℹ Executing anyway - you can add SL/TP in follow-up message")
+            print(f"  💡 Example: 'SL 4500, TP 4600'")
+            
+            # Ask for confirmation in terminal (optional - can remove if you want auto-execution)
+            # For now, we'll just execute with warning
+        
+        # Use 0 for missing SL/TP (will be ignored by MT5)
+        stop_loss = signal.stop_loss or 0.0
+        take_profit = signal.take_profit or 0.0
+        
         # Determine lot size
-        lot_size = signal.lot_size or self.config.get('risk.default_lot_size', 0.1)
+        lot_size = signal.lot_size or self.config.get('risk.default_lot_size', 3.0)
         
         # Validate lot size
         is_valid, error_msg = validate_lot_size(lot_size, self.config)
@@ -368,22 +385,25 @@ class TradingBot:
             print(f"  ✗ {error_msg}")
             return
         
-        # Calculate risk-reward ratio (now with actual entry price)
-        rr_ratio = calculate_risk_reward(
-            signal.entry_price,
-            signal.stop_loss,
-            signal.take_profit,
-            signal.action
-        )
-        min_rr = self.config.get('risk.min_risk_reward_ratio', 1.0)
-        
-        print(f"  Risk-Reward Ratio: {rr_ratio:.2f}")
-        
-        if rr_ratio < min_rr:
-            print(f"  ✗ RR ratio {rr_ratio:.2f} below minimum {min_rr}")
-            print(f"  💡 Tip: You can lower 'risk.min_risk_reward_ratio' in config.yaml")
-            print(f"     Current minimum: {min_rr}, Signal RR: {rr_ratio:.2f}")
-            return
+        # Calculate risk-reward ratio (only if we have SL and TP)
+        if stop_loss > 0 and take_profit > 0:
+            rr_ratio = calculate_risk_reward(
+                signal.entry_price,
+                stop_loss,
+                take_profit,
+                signal.action
+            )
+            min_rr = self.config.get('risk.min_risk_reward_ratio', 1.0)
+            
+            print(f"  Risk-Reward Ratio: {rr_ratio:.2f}")
+            
+            if rr_ratio < min_rr:
+                print(f"  ✗ RR ratio {rr_ratio:.2f} below minimum {min_rr}")
+                print(f"  💡 Tip: You can lower 'risk.min_risk_reward_ratio' in config.yaml")
+                print(f"     Current minimum: {min_rr}, Signal RR: {rr_ratio:.2f}")
+                return
+        else:
+            print(f"  ⚠ Skipping RR ratio check (no SL/TP)")
         
         # Check max open trades
         max_trades = self.config.get('risk.max_open_trades', 5)
@@ -406,8 +426,8 @@ class TradingBot:
                 symbol=signal.pair,
                 order_type=signal.action,
                 lot_size=lot_size,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
                 deviation=self.config.get('mt5.deviation', 5),
                 comment=self.config.get('mt5.order_comment', 'TelegramBot')
             )
@@ -526,8 +546,8 @@ class TradingBot:
                     symbol=signal.pair,
                     order_type=signal.action,
                     lot_size=lot_size,
-                    stop_loss=signal.stop_loss,
-                    take_profit=signal.take_profit,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
                     deviation=self.config.get('mt5.deviation', 5),
                     comment=self.config.get('mt5.order_comment', 'TelegramBot')
                 )
@@ -538,8 +558,8 @@ class TradingBot:
                     order_type=pending_type,
                     lot_size=lot_size,
                     entry_price=entry_price,
-                    stop_loss=signal.stop_loss,
-                    take_profit=signal.take_profit,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
                     comment=self.config.get('mt5.order_comment', 'TelegramBot')
                 )
         
@@ -563,8 +583,8 @@ class TradingBot:
                 'pair': signal.pair,
                 'action': signal.action,
                 'entry_price': signal.entry_price,
-                'stop_loss': signal.stop_loss,
-                'take_profit': signal.take_profit,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
                 'lot_size': lot_size,
                 'mt5_ticket': ticket,
                 'original_message': original_message,

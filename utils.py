@@ -222,7 +222,7 @@ def validate_lot_size(lot_size: float, config: Config) -> tuple[bool, str]:
         Tuple of (is_valid, error_message)
     """
     min_lot = config.get('risk.min_lot_size', 0.01)
-    max_lot = config.get('risk.max_lot_size', 1.0)
+    max_lot = config.get('risk.max_lot_size', 5.0)
     
     if lot_size < min_lot:
         return False, f"Lot size {lot_size} is below minimum {min_lot}"
