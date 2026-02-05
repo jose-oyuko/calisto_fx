@@ -50,6 +50,13 @@ class Trade:
     telegram_msg_id: Optional[int] = None
     signal_provider: Optional[str] = None
     
+    # NEW: Multi-TP and two-entry tracking
+    signal_entry: Optional[float] = None  # Provider's intended entry price
+    actual_entry: Optional[float] = None  # Our actual fill price
+    tp_levels: List[float] = field(default_factory=list)  # Multiple TP levels
+    partials_taken: int = 0  # Counter for partial closes (0-4)
+    partial_history: List[Dict[str, Any]] = field(default_factory=list)  # Track each partial
+    
     # Timestamps
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -73,6 +80,19 @@ class Trade:
         # Handle modifications list
         if 'modifications' not in data:
             data['modifications'] = []
+        
+        # Handle new fields with defaults for backward compatibility
+        if 'signal_entry' not in data:
+            data['signal_entry'] = None
+        if 'actual_entry' not in data:
+            data['actual_entry'] = data.get('entry_price')  # Use entry_price as fallback
+        if 'tp_levels' not in data:
+            data['tp_levels'] = []
+        if 'partials_taken' not in data:
+            data['partials_taken'] = 0
+        if 'partial_history' not in data:
+            data['partial_history'] = []
+        
         return cls(**data)
     
     def add_modification(self, modification_type: str, details: Dict[str, Any]):
@@ -108,6 +128,59 @@ class Trade:
             'old_tp': old_tp,
             'new_tp': new_tp
         })
+    
+    def get_next_partial_percentage(self) -> Optional[int]:
+        """
+        Get the percentage for the next partial close
+        
+        Returns:
+            Percentage to close (30, 20, 20, 20) or None if all taken
+        """
+        partial_percentages = [30, 20, 20, 20]  # First 4 partials, final 10% runs
+        
+        if self.partials_taken >= 4:
+            return None  # All 4 partials taken, final 10% running
+        
+        return partial_percentages[self.partials_taken]
+    
+    def record_partial_close(self, percentage: float, price: float, lots_closed: float):
+        """
+        Record a partial close in history
+        
+        Args:
+            percentage: Percentage closed
+            price: Close price
+            lots_closed: Lots that were closed
+        """
+        self.partials_taken += 1
+        self.partial_history.append({
+            'partial_number': self.partials_taken,
+            'percentage': percentage,
+            'price': price,
+            'lots_closed': lots_closed,
+            'timestamp': datetime.now().isoformat()
+        })
+        self.add_modification('partial_close', {
+            'partial_number': self.partials_taken,
+            'percentage': percentage,
+            'price': price,
+            'lots_closed': lots_closed
+        })
+    
+    def get_be_reference_price(self) -> float:
+        """
+        Get the appropriate breakeven reference price
+        Uses signal_entry if available, otherwise actual_entry
+        
+        Returns:
+            The price to use for breakeven calculations
+        """
+        if self.signal_entry and self.signal_entry > 0:
+            return self.signal_entry
+        elif self.actual_entry and self.actual_entry > 0:
+            return self.actual_entry
+        else:
+            return self.entry_price
     
     def close(self, exit_price: float, profit_loss: float):
         """Mark trade as closed"""

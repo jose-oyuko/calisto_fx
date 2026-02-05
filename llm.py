@@ -58,7 +58,8 @@ class NewSignal(BaseModel):
     action: str = Field(..., description="BUY or SELL")
     entry_price: float = Field(..., description="Entry price")
     stop_loss: Optional[float] = Field(None, description="Stop loss price (can be added later)")
-    take_profit: Optional[float] = Field(None, description="Take profit price (can be added later)")
+    take_profit: Optional[float] = Field(None, description="Primary take profit price")
+    tp_levels: Optional[List[float]] = Field(None, description="Multiple TP levels if specified (e.g., [4450, 4470, 4500, 4550])")
     lot_size: Optional[float] = Field(None, description="Position size in lots")
     execution_type: str = Field(default="immediate", description="immediate, pending, or conditional")
     confidence: float = Field(..., description="Confidence score 0-1")
@@ -152,7 +153,12 @@ class LLMInterpreter:
                         },
                         "take_profit": {
                             "type": "number",
-                            "description": "Take profit price (optional - can be added in follow-up message)"
+                            "description": "Primary take profit price (use first TP if multiple)"
+                        },
+                        "tp_levels": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "description": "Multiple TP levels if signal has them (e.g., 'TP: 4450/4470/4500' → [4450, 4470, 4500])"
                         },
                         "lot_size": {
                             "type": "number",

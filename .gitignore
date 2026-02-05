@@ -58,3 +58,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# mine
+IMPLEMENTATION*
+*telegram

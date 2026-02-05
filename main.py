@@ -68,6 +68,12 @@ class TradingBot:
         self.last_executed_pair: Optional[str] = None
         self.last_signal_time: Optional[str] = None
         
+        # Message correlation for merging signals
+        self.last_signal_timestamp: Optional[datetime] = None
+        self.last_signal_pair: Optional[str] = None
+        self.last_signal_action: Optional[str] = None
+        self.last_signal_had_sltp: bool = True
+        
         self.logger.info("Trading Bot initialized")
     
     def startup(self) -> bool:
@@ -248,6 +254,9 @@ class TradingBot:
         # Start listening
         self.telegram_client.start_listening(self.selected_chat_id)
         
+        # Start TP monitoring thread
+        self.start_tp_monitor()
+        
         self.is_running = True
         self.logger.info("Started listening to messages")
     
@@ -342,6 +351,75 @@ class TradingBot:
         if not signal.pair or signal.pair.upper() in ['GOLD', 'XAU', '']:
             signal.pair = 'XAUUSD'
             print(f"  ℹ No specific pair - defaulting to XAUUSD (Gold)")
+        
+        # Check for message correlation (BUY NOW followed by BUY RANGE)
+        should_modify_existing = False
+        existing_trade = None
+        
+        if self.last_signal_timestamp:
+            time_diff = (datetime.now() - self.last_signal_timestamp).total_seconds()
+            
+            if (time_diff < 60 and  # Within 60 seconds
+                self.last_signal_pair == signal.pair and
+                self.last_signal_action == signal.action and
+                not self.last_signal_had_sltp):  # Last signal had no SL/TP
+                
+                # This is likely a completion of previous signal
+                print(f"  ℹ Detected potential signal completion ({time_diff:.0f}s after previous)")
+                active_trades = self.trade_manager.get_active_trades()
+                
+                if active_trades:
+                    # Find most recent matching trade
+                    for trade in reversed(active_trades):
+                        if trade.pair == signal.pair and trade.action == signal.action:
+                            if not trade.stop_loss or trade.stop_loss == 0:
+                                should_modify_existing = True
+                                existing_trade = trade
+                                break
+        
+        if should_modify_existing and existing_trade:
+            # MODIFY the existing trade instead of creating new one
+            print(f"  {colorize('🔄 MODIFYING EXISTING TRADE', 'yellow')}")
+            print(f"  Ticket: {existing_trade.mt5_ticket}")
+            
+            # Store signal entry from the range
+            existing_trade.signal_entry = signal.entry_price
+            existing_trade.actual_entry = existing_trade.entry_price  # Keep original
+            
+            # Extract and store TP levels
+            if signal.tp_levels and len(signal.tp_levels) > 0:
+                existing_trade.tp_levels = signal.tp_levels
+                existing_trade.take_profit = signal.tp_levels[0]  # Set first TP
+                print(f"  TP levels: {signal.tp_levels}")
+            elif signal.take_profit:
+                existing_trade.take_profit = signal.take_profit
+            
+            # Set SL
+            existing_trade.stop_loss = signal.stop_loss or 0
+            
+            # Modify in MT5
+            success, message = self.mt5_client.modify_order(
+                ticket=existing_trade.mt5_ticket,
+                stop_loss=existing_trade.stop_loss,
+                take_profit=existing_trade.take_profit
+            )
+            
+            if success:
+                print(f"  {colorize('✓ Added SL/TP to existing position', 'green')}")
+                print(f"  Signal entry: {existing_trade.signal_entry}")
+                print(f"  Actual entry: {existing_trade.actual_entry}")
+                print(f"  SL: {existing_trade.stop_loss} | TP: {existing_trade.take_profit}")
+                
+                # Save updated trade
+                self.trade_manager.save_trades()
+                
+                # Track this completion
+                self.last_signal_timestamp = datetime.now()
+                self.last_signal_had_sltp = True
+            else:
+                print(f"  ✗ Failed to modify: {message}")
+            
+            return  # Exit early, don't create new trade
         
         print(f"  Pair: {signal.pair}")
         print(f"  Action: {colorize(signal.action, 'green' if signal.action == 'BUY' else 'red')}")
@@ -589,8 +667,13 @@ class TradingBot:
                 'pair': signal.pair,
                 'action': signal.action,
                 'entry_price': signal.entry_price,
+                'actual_entry': signal.entry_price,  # Will be updated with actual fill
+                'signal_entry': signal.entry_price if signal.execution_type == "pending" else None,
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
+                'tp_levels': signal.tp_levels if signal.tp_levels else [],
+                'partials_taken': 0,
+                'partial_history': [],
                 'lot_size': lot_size,
                 'mt5_ticket': ticket,
                 'original_message': original_message,
@@ -604,6 +687,12 @@ class TradingBot:
             
             # Display summary
             print_trade_summary(trade_data, color=True)
+            
+            # Track this signal for correlation
+            self.last_signal_timestamp = datetime.now()
+            self.last_signal_pair = signal.pair
+            self.last_signal_action = signal.action
+            self.last_signal_had_sltp = (signal.stop_loss is not None and signal.take_profit is not None)
         else:
             print(f"  {colorize('✗ EXECUTION FAILED', 'red')}")
             print(f"  {message}")
@@ -757,9 +846,54 @@ class TradingBot:
         new_tp = signal.new_take_profit if signal.new_take_profit else trade.take_profit
         
         # Handle special cases like "move to breakeven"
-        if "breakeven" in original_message.lower() or "be" in original_message.lower():
-            new_sl = trade.entry_price
-            print(f"  Moving SL to breakeven: {new_sl}")
+        if "breakeven" in original_message.lower() or " be " in original_message.lower() or original_message.lower().endswith(" be"):
+            # Smart BE logic based on profitability
+            symbol_info = self.mt5_client.get_symbol_info(trade.pair)
+            if symbol_info:
+                current_bid = symbol_info['bid']
+                current_ask = symbol_info['ask']
+                market_price = current_bid if trade.action == "SELL" else current_ask
+                
+                # Get reference prices
+                signal_entry = trade.signal_entry if trade.signal_entry else trade.actual_entry
+                actual_entry = trade.actual_entry if trade.actual_entry else trade.entry_price
+                
+                print(f"  ℹ BE Analysis:")
+                print(f"    Current price: {market_price}")
+                print(f"    Signal entry: {signal_entry}")
+                print(f"    Actual entry: {actual_entry}")
+                
+                # Determine BE behavior based on profitability
+                if trade.action == "BUY":
+                    if market_price > actual_entry:
+                        # We're in profit - use our entry
+                        new_sl = actual_entry
+                        print(f"  ℹ We're in profit - moving SL to our entry ({actual_entry})")
+                    elif market_price > signal_entry:
+                        # Provider in profit, we're in loss - use provider's entry
+                        new_sl = signal_entry
+                        print(f"  ℹ Provider profitable, we're not - moving SL to signal entry ({signal_entry})")
+                    else:
+                        # Both in loss - don't move SL
+                        print(f"  ⚠ Both positions in loss - not moving SL")
+                        return
+                else:  # SELL
+                    if market_price < actual_entry:
+                        # We're in profit
+                        new_sl = actual_entry
+                        print(f"  ℹ We're in profit - moving SL to our entry ({actual_entry})")
+                    elif market_price < signal_entry:
+                        # Provider in profit, we're in loss
+                        new_sl = signal_entry
+                        print(f"  ℹ Provider profitable, we're not - moving SL to signal entry ({signal_entry})")
+                    else:
+                        # Both in loss
+                        print(f"  ⚠ Both positions in loss - not moving SL")
+                        return
+            else:
+                # Fallback to simple BE
+                new_sl = trade.get_be_reference_price()
+                print(f"  Moving SL to breakeven: {new_sl}")
         else:
             if new_sl != trade.stop_loss:
                 print(f"  New SL: {new_sl} (was {trade.stop_loss})")
@@ -844,6 +978,29 @@ class TradingBot:
             print(f"  ℹ This is a pending order, not an open position yet")
             print(f"  💡 To cancel pending order, use MT5 directly or wait for it to fill")
             return
+        
+        # For partial closes, check if we're profitable
+        if signal.action_type == "partial_close" and signal.close_percent < 100:
+            symbol_info = self.mt5_client.get_symbol_info(trade.pair)
+            if symbol_info:
+                market_price = symbol_info['bid'] if trade.action == "SELL" else symbol_info['ask']
+                actual_entry = trade.actual_entry if trade.actual_entry else trade.entry_price
+                
+                # Check if we're profitable
+                is_profitable = False
+                if trade.action == "BUY":
+                    is_profitable = market_price > actual_entry
+                else:
+                    is_profitable = market_price < actual_entry
+                
+                if not is_profitable:
+                    print(f"  ⚠ Position not profitable yet")
+                    print(f"    Current: {market_price}, Entry: {actual_entry}")
+                    print(f"  ℹ Skipping partial close - waiting for profit")
+                    return
+                else:
+                    profit_points = abs(market_price - actual_entry)
+                    print(f"  ✓ Position profitable (+{profit_points:.1f} points)")
         
         # Determine volume to close
         volume = None
@@ -1040,6 +1197,108 @@ class TradingBot:
             self.logger.info(f"Sync complete: {changes} changes made")
         
         return changes
+    
+    def start_tp_monitor(self):
+        """Start background thread to monitor TP levels"""
+        import threading
+        import time
+        
+        def monitor_loop():
+            while self.is_running:
+                try:
+                    self._check_tp_levels()
+                    time.sleep(10)  # Check every 10 seconds
+                except Exception as e:
+                    self.logger.error(f"TP monitor error: {e}")
+        
+        monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
+        monitor_thread.start()
+        self.logger.info("TP monitor started")
+    
+    def _check_tp_levels(self):
+        """Check if any TP levels have been hit"""
+        active_trades = self.trade_manager.get_active_trades()
+        
+        for trade in active_trades:
+            if not trade.tp_levels or len(trade.tp_levels) == 0:
+                continue  # No multi-TP setup
+            
+            if trade.partials_taken >= 4:
+                continue  # All partials already taken
+            
+            # Get current price
+            symbol_info = self.mt5_client.get_symbol_info(trade.pair)
+            if not symbol_info:
+                continue
+            
+            current_price = symbol_info['bid'] if trade.action == "SELL" else symbol_info['ask']
+            
+            # Check next TP level
+            next_tp_index = trade.partials_taken
+            if next_tp_index < len(trade.tp_levels):
+                next_tp = trade.tp_levels[next_tp_index]
+                
+                # Check if TP hit
+                tp_hit = False
+                if trade.action == "BUY":
+                    tp_hit = current_price >= next_tp
+                else:
+                    tp_hit = current_price <= next_tp
+                
+                if tp_hit:
+                    self.logger.info(f"TP{next_tp_index + 1} hit for {trade.pair} at {next_tp}")
+                    self._execute_auto_partial(trade, next_tp, current_price)
+    
+    def _execute_auto_partial(self, trade, tp_level, current_price):
+        """Execute automatic partial close at TP level"""
+        percentage = trade.get_next_partial_percentage()
+        
+        if percentage is None:
+            return
+        
+        print(f"\n  {colorize('🎯 TP LEVEL HIT', 'green')}")
+        print(f"  Trade: {trade.action} {trade.pair}")
+        print(f"  TP{trade.partials_taken + 1}: {tp_level}")
+        print(f"  Closing: {percentage}%")
+        
+        # Calculate lots to close
+        volume = trade.lot_size * (percentage / 100.0)
+        
+        # Execute close
+        success, close_price, message = self.mt5_client.close_order(
+            ticket=trade.mt5_ticket,
+            volume=volume
+        )
+        
+        if success:
+            print(f"  ✓ Partial closed at {close_price}")
+            
+            # Update trade
+            remaining_lots = trade.lot_size - volume
+            trade.lot_size = remaining_lots
+            trade.record_partial_close(percentage, close_price, volume)
+            
+            # Move SL progressively
+            if trade.partials_taken == 1:
+                # First partial - move to BE
+                new_sl = trade.actual_entry if trade.actual_entry else trade.entry_price
+                self.mt5_client.modify_order(trade.mt5_ticket, stop_loss=new_sl)
+                trade.update_stop_loss(new_sl)
+                print(f"  ✓ SL moved to entry ({new_sl})")
+            
+            elif trade.partials_taken == 2 and len(trade.tp_levels) > 0:
+                # Second partial - move to TP1
+                new_sl = trade.tp_levels[0]
+                self.mt5_client.modify_order(trade.mt5_ticket, stop_loss=new_sl)
+                trade.update_stop_loss(new_sl)
+                print(f"  ✓ SL moved to TP1 ({new_sl})")
+            
+            self.trade_manager.save_trades()
+            total_closed = sum([p['percentage'] for p in trade.partial_history])
+            print(f"  Remaining: {remaining_lots:.2f} lots ({100 - total_closed:.0f}%)")
+        else:
+            print(f"  ✗ Partial close failed: {message}")
+
 
 
 class REPL:
