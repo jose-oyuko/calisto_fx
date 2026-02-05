@@ -389,8 +389,23 @@ class TradingBot:
             # Extract and store TP levels
             if signal.tp_levels and len(signal.tp_levels) > 0:
                 existing_trade.tp_levels = signal.tp_levels
-                existing_trade.take_profit = signal.tp_levels[0]  # Set first TP
+                
+                # Intelligent TP setting
+                if len(signal.tp_levels) == 1:
+                    # Single TP - use it (100% close there)
+                    existing_trade.take_profit = signal.tp_levels[0]
+                elif len(signal.tp_levels) >= 5:
+                    # 5+ TPs - use last as safety net
+                    existing_trade.take_profit = signal.tp_levels[-1]
+                else:
+                    # 2-4 TPs - no MT5 TP, bot controls all
+                    existing_trade.take_profit = 0
+                
                 print(f"  TP levels: {signal.tp_levels}")
+                if existing_trade.take_profit > 0:
+                    print(f"  MT5 TP: {existing_trade.take_profit} (safety net)")
+                else:
+                    print(f"  MT5 TP: None (bot-controlled partials)")
             elif signal.take_profit:
                 existing_trade.take_profit = signal.take_profit
             
@@ -670,7 +685,7 @@ class TradingBot:
                 'actual_entry': signal.entry_price,  # Will be updated with actual fill
                 'signal_entry': signal.entry_price if signal.execution_type == "pending" else None,
                 'stop_loss': stop_loss,
-                'take_profit': take_profit,
+                'take_profit': self._determine_mt5_tp(signal.tp_levels, signal.take_profit),
                 'tp_levels': signal.tp_levels if signal.tp_levels else [],
                 'partials_taken': 0,
                 'partial_history': [],
@@ -1198,33 +1213,104 @@ class TradingBot:
         
         return changes
     
+    def _determine_mt5_tp(self, tp_levels, fallback_tp):
+        """
+        Determine what TP to set in MT5 based on number of TP levels
+        
+        Args:
+            tp_levels: List of TP levels from signal
+            fallback_tp: Single TP if no levels specified
+            
+        Returns:
+            TP value to set in MT5
+        """
+        if not tp_levels or len(tp_levels) == 0:
+            # No TP levels - use fallback
+            return fallback_tp or 0
+        
+        if len(tp_levels) == 1:
+            # Single TP - use it (100% close)
+            return tp_levels[0]
+        
+        if len(tp_levels) >= 5:
+            # 5+ TPs - use last as safety net for final 10%
+            return tp_levels[-1]
+        
+        # 2-4 TPs - no MT5 TP, bot controls all partials
+        return 0
+    
     def start_tp_monitor(self):
-        """Start background thread to monitor TP levels"""
+        """Start real-time TP monitoring thread (1-second interval)"""
         import threading
         import time
         
         def monitor_loop():
+            self.logger.info("Real-time TP monitor starting...")
+            
             while self.is_running:
                 try:
-                    self._check_tp_levels()
-                    time.sleep(10)  # Check every 10 seconds
+                    active_trades = self.trade_manager.get_active_trades()
+                    trades_with_tps = [t for t in active_trades 
+                                       if t.tp_levels and len(t.tp_levels) > 0 and t.partials_taken < 4]
+                    
+                    if not trades_with_tps:
+                        time.sleep(5)  # Idle when no trades to monitor
+                        continue
+                    
+                    # Real-time check using MT5 ticks
+                    for trade in trades_with_tps:
+                        tick = self.mt5_client.mt5.symbol_info_tick(trade.pair)
+                        if tick:
+                            current_price = tick.bid if trade.action == "SELL" else tick.ask
+                            self._check_single_trade_tp(trade, current_price)
+                    
+                    time.sleep(1)  # Check every 1 second (real-time!)
+                    
                 except Exception as e:
                     self.logger.error(f"TP monitor error: {e}")
+                    time.sleep(5)  # On error, wait before retry
+            
+            self.logger.info("TP monitor stopped")
         
         monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
         monitor_thread.start()
-        self.logger.info("TP monitor started")
+        self.logger.info("✓ Real-time TP monitor started (1-second interval)")
+    
+    def _check_single_trade_tp(self, trade, current_price):
+        """
+        Check if TP hit for a single trade
+        
+        Args:
+            trade: Trade object
+            current_price: Current market price
+        """
+        if trade.partials_taken >= len(trade.tp_levels):
+            return  # All TPs taken
+        
+        next_tp_index = trade.partials_taken
+        next_tp = trade.tp_levels[next_tp_index]
+        
+        # Check if TP hit
+        tp_hit = False
+        if trade.action == "BUY":
+            tp_hit = current_price >= next_tp
+        else:  # SELL
+            tp_hit = current_price <= next_tp
+        
+        if tp_hit:
+            self.logger.info(f"TP{next_tp_index + 1} hit for {trade.pair} at {next_tp} (current: {current_price})")
+            self._execute_auto_partial(trade, next_tp, current_price)
     
     def _check_tp_levels(self):
-        """Check if any TP levels have been hit"""
+        """Legacy method - check all trades (called by real-time monitor)"""
         active_trades = self.trade_manager.get_active_trades()
         
         for trade in active_trades:
             if not trade.tp_levels or len(trade.tp_levels) == 0:
-                continue  # No multi-TP setup
+                continue
             
             if trade.partials_taken >= 4:
-                continue  # All partials already taken
+                continue
             
             # Get current price
             symbol_info = self.mt5_client.get_symbol_info(trade.pair)
@@ -1232,33 +1318,20 @@ class TradingBot:
                 continue
             
             current_price = symbol_info['bid'] if trade.action == "SELL" else symbol_info['ask']
-            
-            # Check next TP level
-            next_tp_index = trade.partials_taken
-            if next_tp_index < len(trade.tp_levels):
-                next_tp = trade.tp_levels[next_tp_index]
-                
-                # Check if TP hit
-                tp_hit = False
-                if trade.action == "BUY":
-                    tp_hit = current_price >= next_tp
-                else:
-                    tp_hit = current_price <= next_tp
-                
-                if tp_hit:
-                    self.logger.info(f"TP{next_tp_index + 1} hit for {trade.pair} at {next_tp}")
-                    self._execute_auto_partial(trade, next_tp, current_price)
+            self._check_single_trade_tp(trade, current_price)
     
     def _execute_auto_partial(self, trade, tp_level, current_price):
         """Execute automatic partial close at TP level"""
         percentage = trade.get_next_partial_percentage()
         
         if percentage is None:
+            self.logger.info(f"All partials taken for {trade.pair}, final 10% running")
             return
         
         print(f"\n  {colorize('🎯 TP LEVEL HIT', 'green')}")
         print(f"  Trade: {trade.action} {trade.pair}")
         print(f"  TP{trade.partials_taken + 1}: {tp_level}")
+        print(f"  Current price: {current_price}")
         print(f"  Closing: {percentage}%")
         
         # Calculate lots to close
@@ -1278,25 +1351,40 @@ class TradingBot:
             trade.lot_size = remaining_lots
             trade.record_partial_close(percentage, close_price, volume)
             
-            # Move SL progressively
+            # Progressive SL movement
             if trade.partials_taken == 1:
-                # First partial - move to BE
+                # First partial (30% closed) - move SL to BE (our actual entry)
                 new_sl = trade.actual_entry if trade.actual_entry else trade.entry_price
-                self.mt5_client.modify_order(trade.mt5_ticket, stop_loss=new_sl)
-                trade.update_stop_loss(new_sl)
-                print(f"  ✓ SL moved to entry ({new_sl})")
+                success_sl, msg = self.mt5_client.modify_order(trade.mt5_ticket, stop_loss=new_sl)
+                if success_sl:
+                    trade.update_stop_loss(new_sl)
+                    print(f"  ✓ SL moved to BE ({new_sl})")
+                else:
+                    print(f"  ⚠ Failed to move SL: {msg}")
             
-            elif trade.partials_taken == 2 and len(trade.tp_levels) > 0:
-                # Second partial - move to TP1
-                new_sl = trade.tp_levels[0]
-                self.mt5_client.modify_order(trade.mt5_ticket, stop_loss=new_sl)
-                trade.update_stop_loss(new_sl)
-                print(f"  ✓ SL moved to TP1 ({new_sl})")
+            elif trade.partials_taken == 2:
+                # Second partial (50% closed) - move SL to TP1
+                if len(trade.tp_levels) > 0:
+                    new_sl = trade.tp_levels[0]
+                    success_sl, msg = self.mt5_client.modify_order(trade.mt5_ticket, stop_loss=new_sl)
+                    if success_sl:
+                        trade.update_stop_loss(new_sl)
+                        print(f"  ✓ SL moved to TP1 ({new_sl})")
+                    else:
+                        print(f"  ⚠ Failed to move SL: {msg}")
+            
+            elif trade.partials_taken >= 3:
+                # Third+ partial (70%+ closed) - keep SL at TP1 or trail
+                print(f"  ℹ SL remains at {trade.stop_loss} (TP1)")
             
             self.trade_manager.save_trades()
             total_closed = sum([p['percentage'] for p in trade.partial_history])
             print(f"  Remaining: {remaining_lots:.2f} lots ({100 - total_closed:.0f}%)")
+            
+            if trade.partials_taken >= 4:
+                print(f"  {colorize('✓ Final 10% still running - all partials complete', 'green')}")
         else:
+            self.logger.error(f"Partial close failed for {trade.pair}: {message}")
             print(f"  ✗ Partial close failed: {message}")
 
 
