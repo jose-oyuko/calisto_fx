@@ -359,20 +359,21 @@ class TradingBot:
         if self.last_signal_timestamp:
             time_diff = (datetime.now() - self.last_signal_timestamp).total_seconds()
             
-            if (time_diff < 60 and  # Within 60 seconds
+            if (time_diff < 180 and  # Within 3 minutes (180 seconds)
                 self.last_signal_pair == signal.pair and
-                self.last_signal_action == signal.action and
-                not self.last_signal_had_sltp):  # Last signal had no SL/TP
+                self.last_signal_action == signal.action):  # Same pair and direction
                 
-                # This is likely a completion of previous signal
-                print(f"  ℹ Detected potential signal completion ({time_diff:.0f}s after previous)")
+                # This is likely a follow-up/completion signal
+                print(f"  ℹ Detected potential follow-up signal ({time_diff:.0f}s after previous)")
                 active_trades = self.trade_manager.get_active_trades()
                 
                 if active_trades:
-                    # Find most recent matching trade
+                    # Find most recent matching trade (within last 3 minutes)
                     for trade in reversed(active_trades):
                         if trade.pair == signal.pair and trade.action == signal.action:
-                            if not trade.stop_loss or trade.stop_loss == 0:
+                            # Check if trade was created recently (within last 3 minutes)
+                            trade_age = (datetime.now() - datetime.fromisoformat(trade.created_at)).total_seconds()
+                            if trade_age < 180:
                                 should_modify_existing = True
                                 existing_trade = trade
                                 break
@@ -1108,7 +1109,15 @@ class TradingBot:
         
         self.is_running = False
         
-        # Stop listening first
+        # Disable Telegram reconnection first
+        if self.telegram_client:
+            try:
+                self.telegram_client.disable_reconnect()
+                print("✓ Disabled Telegram auto-reconnect")
+            except Exception as e:
+                self.logger.warning(f"Error disabling reconnect: {e}")
+        
+        # Stop listening
         if self.telegram_client:
             try:
                 self.telegram_client.stop_listening()

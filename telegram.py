@@ -36,6 +36,12 @@ class TelegramListener:
         self.selected_chat_id: Optional[int] = None
         self.message_callback: Optional[Callable] = None
         
+        # Reconnection settings
+        self.reconnect_enabled = True
+        self.max_reconnect_delay = 300  # Max 5 minutes between retries
+        self.reconnect_attempts = 0
+        self.is_reconnecting = False
+        
         self.logger = logging.getLogger('TradingBot.Telegram')
     
     async def connect(self) -> bool:
@@ -256,10 +262,123 @@ class TelegramListener:
             self.logger.error(f"Failed to send message: {e}")
             return False
     
+    def disable_reconnect(self):
+        """Disable automatic reconnection (for clean shutdown)"""
+        self.reconnect_enabled = False
+        self.logger.info("Automatic reconnection disabled")
+    
     async def run_until_disconnected(self):
-        """Keep the client running until disconnected"""
-        if self.client and self.is_connected:
-            await self.client.run_until_disconnected()
+        """
+        Keep the client running with automatic reconnection
+        Handles network interruptions gracefully with infinite retries
+        """
+        self.logger.info("Starting Telegram client with auto-reconnect enabled")
+        
+        while self.reconnect_enabled:
+            try:
+                # Ensure we're connected first
+                if not self.is_connected:
+                    self.logger.warning("Not connected - attempting connection...")
+                    success = await self.connect()
+                    
+                    if not success:
+                        # Connection failed, wait before retry
+                        self.reconnect_attempts += 1
+                        delay = min(5 * self.reconnect_attempts, self.max_reconnect_delay)
+                        self.logger.warning(f"Connection failed. Retrying in {delay}s... (attempt {self.reconnect_attempts})")
+                        await asyncio.sleep(delay)
+                        continue
+                    
+                    # Connection successful
+                    self.reconnect_attempts = 0
+                    self.logger.info("✓ Successfully connected to Telegram")
+                
+                # Now run the client (this is where it usually fails on disconnect)
+                if self.client and self.is_connected:
+                    self.logger.info("Running Telegram client... (listening for messages)")
+                    
+                    try:
+                        await self.client.run_until_disconnected()
+                    except ConnectionError as e:
+                        # Telethon's internal connection error
+                        self.is_connected = False
+                        self.reconnect_attempts += 1
+                        
+                        self.logger.error(f"Telegram connection lost: {e}")
+                        self.logger.info(f"Will reconnect... (attempt {self.reconnect_attempts})")
+                        
+                        # Close the client cleanly
+                        try:
+                            await self.client.disconnect()
+                        except:
+                            pass
+                        
+                        # Wait before reconnecting
+                        delay = min(5 * self.reconnect_attempts, 60)  # Max 60s for connection errors
+                        await asyncio.sleep(delay)
+                        continue
+                    
+                    except OSError as e:
+                        # Network errors (WinError 1232, etc.)
+                        self.is_connected = False
+                        self.reconnect_attempts += 1
+                        
+                        error_code = getattr(e, 'winerror', getattr(e, 'errno', 'unknown'))
+                        self.logger.error(f"Network error [{error_code}]: {e}")
+                        self.logger.info(f"Network lost. Reconnecting... (attempt {self.reconnect_attempts})")
+                        
+                        # Close the client cleanly
+                        try:
+                            await self.client.disconnect()
+                        except:
+                            pass
+                        
+                        # Wait before reconnecting
+                        delay = min(5 * self.reconnect_attempts, 60)
+                        await asyncio.sleep(delay)
+                        continue
+                    
+                    # If we reach here, client disconnected normally
+                    self.logger.warning("Telegram client disconnected normally")
+                    self.is_connected = False
+                    
+            except KeyboardInterrupt:
+                self.logger.info("Keyboard interrupt - stopping reconnection")
+                self.reconnect_enabled = False
+                break
+                
+            except Exception as e:
+                # Catch-all for any other errors
+                self.is_connected = False
+                self.reconnect_attempts += 1
+                
+                self.logger.error(f"Unexpected error: {e.__class__.__name__}: {e}", exc_info=True)
+                self.logger.info(f"Recovering... (attempt {self.reconnect_attempts})")
+                
+                # Try to disconnect cleanly
+                try:
+                    if self.client:
+                        await self.client.disconnect()
+                except:
+                    pass
+                
+                # Wait before retry
+                delay = min(5 * self.reconnect_attempts, self.max_reconnect_delay)
+                await asyncio.sleep(delay)
+                continue
+            
+            # Small delay before next reconnection attempt
+            if not self.is_connected and self.reconnect_enabled:
+                await asyncio.sleep(2)
+        
+        self.logger.info("Auto-reconnect disabled - Telegram client stopped")
+        
+        # Final cleanup
+        try:
+            if self.client and self.is_connected:
+                await self.client.disconnect()
+        except:
+            pass
 
 
 # Synchronous wrapper functions for easier integration
@@ -357,6 +476,10 @@ class TelegramClient:
     def resume_listening(self):
         """Resume listening to messages"""
         self.listener.resume_listening()
+    
+    def disable_reconnect(self):
+        """Disable automatic reconnection"""
+        self.listener.disable_reconnect()
     
     def run_until_disconnected(self):
         """Keep client running"""
