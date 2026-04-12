@@ -62,3 +62,6 @@ htmlcov/
 # mine
 IMPLEMENTATION*
 *telegram
+*.zip
+*.spec
+calisto-fx/

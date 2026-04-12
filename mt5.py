@@ -448,6 +448,8 @@ class MT5Client:
                     ticket: int,
                     stop_loss: Optional[float] = None,
                     take_profit: Optional[float] = None) -> Tuple[bool, str]:
+        # disable trade manager
+        return False, "Can't Modify position, disabled trade manager"
         """
         Modify an open position's SL/TP
         
@@ -565,6 +567,8 @@ class MT5Client:
                    ticket: int,
                    volume: Optional[float] = None,
                    deviation: int = 5) -> Tuple[bool, Optional[float], str]:
+        # disable trade manager
+        return False, None, "Can't close trade, Disable Mamaging Trade"
         """
         Close an open position (full or partial)
         

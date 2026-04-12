@@ -338,6 +338,8 @@ class TradeManager:
         return sorted_trades[:count]
     
     def update_trade(self, trade_id: str, updates: Dict[str, Any]) -> bool:
+        # disable trade management
+        return False
         """
         Update trade with new information
         
@@ -366,6 +368,8 @@ class TradeManager:
         return True
     
     def close_trade(self, trade_id: str, exit_price: float, profit_loss: float = 0.0) -> bool:
+        # disable trade management
+        return False
         """
         Close a trade
         

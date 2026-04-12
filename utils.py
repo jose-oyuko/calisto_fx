@@ -9,28 +9,34 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Union
 from datetime import datetime
 from dotenv import load_dotenv
-import os
+import os, sys
 
 
 class Config:
     """Configuration loader and manager"""
-    
+
     def __init__(self, config_path: str = "config.yaml"):
         """
-        Load configuration from YAML file and environment variables
-        
-        Args:
-            config_path: Path to the config.yaml file
+        Load configuration from YAML file and environment variables.
+        Always loads files from the same folder as the .exe or .py.
         """
-        # Load environment variables
-        load_dotenv()
-        
+
+        # ALWAYS use the folder where the EXE resides
+        base_path = os.path.dirname(sys.argv[0])
+
+        # Build paths
+        env_path = os.path.join(base_path, ".env")
+        yaml_path = os.path.join(base_path, config_path)
+
+        # Load .env file
+        load_dotenv(dotenv_path=env_path)
+
         # Load YAML config
-        config_file = Path(config_path)
+        config_file = Path(yaml_path)
         if not config_file.exists():
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-        
-        with open(config_file, 'r') as f:
+            raise FileNotFoundError(f"Config file not found: {yaml_path}")
+
+        with open(config_file, "r") as f:
             self.config = yaml.safe_load(f)
         
         # Load sensitive data from environment
