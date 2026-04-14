@@ -31,6 +31,7 @@ from trade_manager import TradeManager, TradeStatus
 from mt5 import MT5Client
 from llm import LLMInterpreter, NewSignal, ModifySignal, CloseSignal, NoSignal, MultiActionSignal
 from telegram import TelegramClient
+from regex_signal_detector import detect_signal
 
 
 class TradingBot:
@@ -299,16 +300,22 @@ class TradingBot:
             # Get active trades context
             active_trades = self.trade_manager.get_context_for_llm()
             
-            # Interpret message with LLM (with context)
-            print("  Analyzing with LLM...")
-            system_prompt = self.config.get('llm.system_prompt')
-            signal = self.llm_interpreter.interpret_message(
-                message_text,
-                active_trades=active_trades,
-                system_prompt=system_prompt,
-                recent_messages=recent_context,
-                last_trade_pair=self.last_executed_pair
-            )
+            # # Interpret message with LLM (with context)
+            # print("  Analyzing with LLM...")
+            # system_prompt = self.config.get('llm.system_prompt')
+            # signal = self.llm_interpreter.interpret_message(
+            #     message_text,
+            #     active_trades=active_trades,
+            #     system_prompt=system_prompt,
+            #     recent_messages=recent_context,
+            #     last_trade_pair=self.last_executed_pair
+            # )
+            # print(f"LLM signal is {signal}")
+
+            # analyze signal with regex
+            print("Analyzing using regex")
+            signal = detect_signal(message_text)
+            print(f"the signal from regex is {signal}")
             
             if signal is None:
                 print("  ⚠ Failed to interpret message")
